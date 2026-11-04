@@ -128,6 +128,7 @@ const products={
 let quantities={};
 let sending=false;
 let submitted=false;
+let orderId = crypto.randomUUID();
 const $=id=>document.getElementById(id);
 
 $('date').value=new Date().toLocaleDateString('uk-UA');
@@ -236,6 +237,7 @@ quantity:quantities[i]||0
 .filter(item=>item.quantity>0);
 
 const data={
+orderId: orderId,
 store:$('store').value,
 zone:$('zone').value,
 items:items,
@@ -275,6 +277,7 @@ btn.textContent='Підтвердити та відправити';
 function newOrder(){
 if(sending)return;
 submitted=false;
+orderId = crypto.randomUUID();
 quantities={};
 $('orderForm').reset();
 $('zone').value='White Plus';
