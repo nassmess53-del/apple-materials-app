@@ -71,50 +71,112 @@ try{data=await response.json()}catch{throw new Error('Сервер поверн�
 if(!response.ok||!data.success)throw new Error(data.error||`Помилка сервера (${response.status})`);
 return data;
 }
+// Пам'ятаємо підтверджені завантаження протягом відкритої сесії.
+const uploadedFiles = new Map();
+let reportDateForUpload = null;
+let uploadInProgress = false;
+const PARALLEL_UPLOADS = 3;
+
 async function sendReport(){
-const button=document.getElementById('sendReport');
-const status=document.getElementById('sendStatus');
-const back=document.getElementById('backReview');
-if(!button||button.disabled)return;
-const initData=window.Telegram?.WebApp?.initData||'';
-if(!initData){
-status.textContent='Відкрийте фотозвіт через кнопку в Telegram. У браузері перевірка недоступна.';
-return;
-}
-const files=state.photos.flatMap((group,i)=>group.filter(Boolean).map((file,j)=>({file,step:i+1,number:j+1})));
-if(!files.length){status.textContent='Спочатку додайте фотографії.';return}
-if(files.some(({file})=>file.size>8*1024*1024)){
-status.textContent='Один із файлів перевищує 8 МБ. Зменште його розмір перед надсиланням.';
-return;
-}
-button.disabled=true;
-back.disabled=true;
-try{
-status.textContent='Перевірка Telegram…';
-await apiPost('/auth',{initData});
-const date=new Date();
-const reportDate=new Intl.DateTimeFormat('uk-UA',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',year:'numeric'}).format(date);
-for(let i=0;i<files.length;i++){
-const {file,step,number}=files[i];
-status.textContent=`Завантаження ${i+1} із ${files.length}…`;
-const ext=(file.name.split('.').pop()||'jpg').replace(/[^a-zA-Z0-9]/g,'').slice(0,8)||'jpg';
-const fileName=`Етап_${step}_Фото_${number}.${ext}`;
-await apiPost('/upload',{
-initData,
-storeName:label(state.store),
-reportDate,
-fileName,
-mimeType:file.type||'image/jpeg',
-base64Data:await fileToBase64(file)
-});
-}
-state.screen='done';
-render();
-}catch(error){
-status.textContent=`Не вдалося завершити надсилання: ${error.message}. Частина файлів могла вже завантажитися. Не натискайте повторно без перевірки.`;
-button.disabled=false;
-back.disabled=false;
-}
+  const button=document.getElementById('sendReport');
+  const status=document.getElementById('sendStatus');
+  const back=document.getElementById('backReview');
+  if(!button||uploadInProgress)return;
+
+  const initData=window.Telegram?.WebApp?.initData||'';
+  if(!initData){
+    status.textContent='Відкрийте фотозвіт через кнопку в Telegram. У браузері перевірка недоступна.';
+    return;
+  }
+
+  const files=state.photos.flatMap((group,i)=>
+    group.map((file,j)=>file?{file,step:i+1,number:j+1}:null).filter(Boolean)
+  );
+  if(!files.length){
+    status.textContent='Спочатку додайте фотографії.';
+    return;
+  }
+  if(files.some(({file})=>file.size>8*1024*1024)){
+    status.textContent='Один із файлів перевищує 8 МБ. Оригінал не змінюється — виберіть інший файл.';
+    return;
+  }
+
+  uploadInProgress=true;
+  button.disabled=true;
+  back.disabled=true;
+  root.querySelectorAll('[data-edit]').forEach(b=>b.disabled=true);
+
+  try{
+    status.textContent='Перевірка Telegram…';
+    await apiPost('/auth',{initData});
+
+    if(!reportDateForUpload){
+      reportDateForUpload=new Intl.DateTimeFormat('uk-UA',{
+        timeZone:'Europe/Kyiv',
+        day:'2-digit',
+        month:'2-digit',
+        year:'numeric'
+      }).format(new Date());
+    }
+
+    const pending=files.filter(({file,step,number})=>uploadedFiles.get(`${step}:${number}`)!==file);
+    let completed=files.length-pending.length;
+    let nextIndex=0;
+    const errors=[];
+
+    const updateStatus=()=>{
+      status.textContent=`Збережено ${completed} із ${files.length} фото. Одночасно завантажуються до 3 файлів. Не закривайте Telegram.`;
+    };
+    updateStatus();
+
+    async function uploadWorker(){
+      while(nextIndex<pending.length){
+        const item=pending[nextIndex++];
+        const {file,step,number}=item;
+        const ext=(file.name.split('.').pop()||'jpg')
+          .replace(/[^a-zA-Z0-9]/g,'').slice(0,8)||'jpg';
+        const fileName=`Етап_${step}_Фото_${number}.${ext}`;
+
+        try{
+          await apiPost('/upload',{
+            initData,
+            storeName:label(state.store),
+            reportDate:reportDateForUpload,
+            fileName,
+            mimeType:file.type||'image/jpeg',
+            base64Data:await fileToBase64(file)
+          });
+          uploadedFiles.set(`${step}:${number}`,file);
+          completed++;
+          updateStatus();
+        }catch(error){
+          errors.push(`Етап ${step}, фото ${number}: ${error.message}`);
+        }
+      }
+    }
+
+    await Promise.all(
+      Array.from({length:Math.min(PARALLEL_UPLOADS,pending.length)},
+        ()=>uploadWorker())
+    );
+
+    if(errors.length){
+      status.textContent=`Збережено ${completed} із ${files.length}. Не підтверджено ${errors.length} фото. Перевірте папку Google Drive перед повторною спробою: сервер міг зберегти файл, навіть якщо відповідь загубилася. ${errors[0]}`;
+      button.textContent='Повторити непідтверджені';
+    }else{
+      state.screen='done';
+      render();
+    }
+  }catch(error){
+    status.textContent=`Не вдалося перевірити Telegram: ${error.message}`;
+  }finally{
+    uploadInProgress=false;
+    if(state.screen==='review'){
+      button.disabled=false;
+      back.disabled=false;
+      root.querySelectorAll('[data-edit]').forEach(b=>b.disabled=false);
+    }
+  }
 }
 
 function showStores(query){const q=query.trim().toLocaleLowerCase();const matches=STORES.filter(s=>label(s).toLocaleLowerCase().includes(q)).sort((a,b)=>label(a).localeCompare(label(b),'uk')).slice(0,50);const el=document.getElementById('storeResults');el.innerHTML=matches.map(s=>`<button type="button" data-id="${s.id}">${esc(label(s))}</button>`).join('')||'<p class="muted" style="padding:10px">Магазин не знайдено</p>';el.querySelectorAll('[data-id]').forEach(b=>b.onclick=()=>{state.store=STORES.find(s=>s.id===b.dataset.id);document.getElementById('storeSearch').value=label(state.store);document.getElementById('selected').classList.remove('hidden');document.getElementById('selected').textContent=label(state.store);document.getElementById('goRules').disabled=false;el.innerHTML=''});}
