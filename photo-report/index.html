@@ -10,6 +10,7 @@ const STEPS=[
 {title:'Аксесуари',description:'Сфотографуйте викладку аксесуарів. Переконайтеся, що вони розміщені відповідно до актуальних Merchandising Guidelines.',min:1,max:2,add:1},
 {title:'DCOTA',description:'Завантажте необхідні скріншоти Store Info, Other Devices та Wi-Fi. Можна вибрати одразу багато файлів.',min:1,max:Infinity,add:0}
 ];
+const API_URL='https://apple-photo-reports.nass-mess53.workers.dev';
 const root=document.getElementById('root');
 const state={screen:'store',store:null,checked:false,step:0,counts:[4,2,4,1,1],photos:[[],[],[],[],[],[]],previews:new Map()};
 for(let i=0;i<5;i++)state.photos[i]=Array(STEPS[i].min).fill(null);
@@ -38,8 +39,84 @@ else{let chosen=-1;const camera=document.getElementById('cameraInput'),gallery=d
 return;
 }
 if(state.screen==='review'){
-const totals=state.photos.map(a=>a.filter(Boolean).length);root.innerHTML=`<section class="card"><h2>Перевірка фото-звіту</h2><p><strong>${esc(label(state.store))}</strong></p>${STEPS.map((s,i)=>`<div class="fileRow"><span>${i+1}. ${esc(s.title)}</span><span>${totals[i]} файлів <button data-edit="${i}">Змінити</button></span></div>`).join('')}<p class="hint">Тестова версія: фотографії зберігаються лише в пам’яті цього екрана. Надсилання на Google Drive ще не підключено.</p><p class="warning">Не закривайте застосунок, якщо хочете продовжити тестування з вибраними файлами.</p></section><div class="footer actions"><button id="backReview">← Назад</button><button class="primary" disabled>Надіслати звіт (незабаром)</button></div>`;root.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{state.step=+b.dataset.edit;state.screen='steps';render()});document.getElementById('backReview').onclick=()=>{state.step=5;state.screen='steps';render()};return;
-}}
+const totals=state.photos.map(a=>a.filter(Boolean).length);
+root.innerHTML=`<section class="card"><h2>Перевірка фото-звіту</h2><p><strong>${esc(label(state.store))}</strong></p>${STEPS.map((s,i)=>`<div class="fileRow"><span>${i+1}. ${esc(s.title)}</span><span>${totals[i]} файлів <button data-edit="${i}">Змінити</button></span></div>`).join('')}<p class="hint">Після натискання кнопки файли будуть надіслані до Google Drive. Не закривайте Telegram до завершення завантаження.</p><p id="sendStatus" role="status"></p></section><div class="footer actions"><button id="backReview">← Назад</button><button class="primary" id="sendReport">Надіслати звіт</button></div>`;
+root.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{state.step=+b.dataset.edit;state.screen='steps';render()});
+document.getElementById('backReview').onclick=()=>{state.step=5;state.screen='steps';render()};
+document.getElementById('sendReport').onclick=sendReport;
+return;
+}
+if(state.screen==='done'){
+root.innerHTML=`<section class="card"><h2>Звіт надіслано ✅</h2><p>Файли фотозвіту успішно передано для збереження.</p><p><strong>${esc(label(state.store))}</strong></p></section>`;
+return;
+}
+}
+
+function fileToBase64(file){
+return new Promise((resolve,reject)=>{
+const reader=new FileReader();
+reader.onerror=()=>reject(new Error('Не вдалося прочитати файл'));
+reader.onload=()=>resolve(String(reader.result).split(',')[1]);
+reader.readAsDataURL(file);
+});
+}
+async function apiPost(path,payload){
+const response=await fetch(API_URL+path,{
+method:'POST',
+headers:{'Content-Type':'application/json'},
+body:JSON.stringify(payload)
+});
+let data;
+try{data=await response.json()}catch{throw new Error('Сервер повернув некоректну відповідь')}
+if(!response.ok||!data.success)throw new Error(data.error||`Помилка сервера (${response.status})`);
+return data;
+}
+async function sendReport(){
+const button=document.getElementById('sendReport');
+const status=document.getElementById('sendStatus');
+const back=document.getElementById('backReview');
+if(!button||button.disabled)return;
+const initData=window.Telegram?.WebApp?.initData||'';
+if(!initData){
+status.textContent='Відкрийте фотозвіт через кнопку в Telegram. У браузері перевірка недоступна.';
+return;
+}
+const files=state.photos.flatMap((group,i)=>group.filter(Boolean).map((file,j)=>({file,step:i+1,number:j+1})));
+if(!files.length){status.textContent='Спочатку додайте фотографії.';return}
+if(files.some(({file})=>file.size>8*1024*1024)){
+status.textContent='Один із файлів перевищує 8 МБ. Зменште його розмір перед надсиланням.';
+return;
+}
+button.disabled=true;
+back.disabled=true;
+try{
+status.textContent='Перевірка Telegram…';
+await apiPost('/auth',{initData});
+const date=new Date();
+const reportDate=new Intl.DateTimeFormat('uk-UA',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',year:'numeric'}).format(date);
+for(let i=0;i<files.length;i++){
+const {file,step,number}=files[i];
+status.textContent=`Завантаження ${i+1} із ${files.length}…`;
+const ext=(file.name.split('.').pop()||'jpg').replace(/[^a-zA-Z0-9]/g,'').slice(0,8)||'jpg';
+const fileName=`Етап_${step}_Фото_${number}.${ext}`;
+await apiPost('/upload',{
+initData,
+storeName:label(state.store),
+reportDate,
+fileName,
+mimeType:file.type||'image/jpeg',
+base64Data:await fileToBase64(file)
+});
+}
+state.screen='done';
+render();
+}catch(error){
+status.textContent=`Не вдалося завершити надсилання: ${error.message}. Частина файлів могла вже завантажитися. Не натискайте повторно без перевірки.`;
+button.disabled=false;
+back.disabled=false;
+}
+}
+
 function showStores(query){const q=query.trim().toLocaleLowerCase();const matches=STORES.filter(s=>label(s).toLocaleLowerCase().includes(q)).sort((a,b)=>label(a).localeCompare(label(b),'uk')).slice(0,50);const el=document.getElementById('storeResults');el.innerHTML=matches.map(s=>`<button type="button" data-id="${s.id}">${esc(label(s))}</button>`).join('')||'<p class="muted" style="padding:10px">Магазин не знайдено</p>';el.querySelectorAll('[data-id]').forEach(b=>b.onclick=()=>{state.store=STORES.find(s=>s.id===b.dataset.id);document.getElementById('storeSearch').value=label(state.store);document.getElementById('selected').classList.remove('hidden');document.getElementById('selected').textContent=label(state.store);document.getElementById('goRules').disabled=false;el.innerHTML=''});}
 try{window.Telegram?.WebApp?.ready();window.Telegram?.WebApp?.expand()}catch(e){}render();
 </script></body></html>
