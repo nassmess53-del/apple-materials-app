@@ -133,6 +133,8 @@ async function apiPost(path,payload,timeoutMs=55000){
 const uploadedFiles=new Map();
 const uploadIdentifiers=new Map();
 let reportDateForUpload=null;
+// Один ID для всього фотозвіту, незмінний під час повторних спроб.
+let reportIdForUpload=null;
 let uploadInProgress=false;
 // Обмежуємо навантаження на Apps Script. Після тестів параметр можна змінити.
 const PARALLEL_UPLOADS=2;
@@ -167,6 +169,9 @@ async function sendReport(){
       reportDateForUpload=new Intl.DateTimeFormat('uk-UA',{
         timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',year:'numeric'
       }).format(new Date());
+    }
+    if(!reportIdForUpload){
+      reportIdForUpload=crypto.randomUUID().replace(/-/g,'');
     }
     // Ідентифікатори створюються до початку відправлення, а не при кожній спробі.
     files.forEach(item=>{item.uploadId=uploadIdFor(item.key,item.file)});
@@ -218,9 +223,28 @@ async function sendReport(){
     if(errors.length){
       status.textContent=`Збережено ${completed} із ${files.length}. Не підтверджено ${errors.length} фото. ${errors[0]} Повторна спроба використовуватиме ті самі ідентифікатори. Не закривайте сторінку.`;
       button.textContent='Повторити непідтверджені';
-    }else{state.screen='done';render()}
+    }else{
+      // Усі фото підтверджені Google Drive. Реєструємо один завершений звіт.
+      // При повторі використовуємо той самий reportId, щоб не збільшувати лічильник двічі.
+      status.textContent='Усі фотографії збережено. Реєструємо фотозвіт у Google Таблиці…';
+      try{
+        await apiPost('/complete',{
+          initData,
+          action:'completeReport',
+          reportId:reportIdForUpload,
+          apid:String(state.store.id),
+          storeName:label(state.store),
+          reportDate:reportDateForUpload
+        });
+        state.screen='done';
+        render();
+      }catch(error){
+        status.textContent=`Усі ${files.length} фото збережено на Google Drive, але реєстрацію в таблиці не підтверджено: ${error.message}. Натисніть кнопку повторно. Фотографії не завантажуватимуться вдруге.`;
+        button.textContent='Повторити реєстрацію звіту';
+      }
+    }
   }catch(error){
-    status.textContent=`Не вдалося розпочати завантаження: ${error.message}`;
+    status.textContent=`Не вдалося виконати запит: ${error.message}`;
   }finally{
     uploadInProgress=false;
     if(state.screen==='review'){
