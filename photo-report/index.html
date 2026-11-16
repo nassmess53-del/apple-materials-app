@@ -60,10 +60,10 @@ reader.onload=()=>resolve(String(reader.result).split(',')[1]);
 reader.readAsDataURL(file);
 });
 }
-// Параметри якості. 0.92 — якість JPEG, а не зменшення розміру на 92%.
-const PHOTO_MAX_WIDTH=3264;
-const PHOTO_MAX_HEIGHT=2448;
-const PHOTO_JPEG_QUALITY=0.92;
+// Параметри якості. 0.90 — якість JPEG, а не зменшення розміру на 90%.
+const PHOTO_MAX_WIDTH=3024;
+const PHOTO_MAX_HEIGHT=2268;
+const PHOTO_JPEG_QUALITY=0.90;
 const preparedPhotoCache=new WeakMap();
 
 // Етапи 1–3 та 5 оптимізуються. Close-up (4) і DCOTA (6) — оригінали.
