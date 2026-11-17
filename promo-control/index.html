@@ -23,11 +23,56 @@ if(state.screen==='upload'){
 root.innerHTML=`<section class="card"><h2>Завантаження</h2><p>${esc(state.progress)}</p>${state.error?`<p style="color:#b42318">${esc(state.error)}</p><button class="primary" id="retry">Повторити непідтверджені</button>`:'<p class="hint">Не закривайте додаток до завершення.</p>'}</section>`;
 if(state.error)document.getElementById('retry').onclick=sendReport;return}
 if(state.screen==='done'){
-root.innerHTML=`<section class="card"><h2>Звіт надіслано ✓</h2><p>Звіт зареєстровано в Apple Promo Control.</p><a target="_blank" rel="noopener" href="${esc(state.folderUrl)}">Відкрити Google Drive</a></section>`;return}
+root.innerHTML=`<section class="card"><h2>Звіт надіслано ✓</h2><p>Звіт зареєстровано в Apple Promo Control.</p>${state.folderUrl?`<a target="_blank" rel="noopener" href="${esc(state.folderUrl)}">Відкрити Google Drive</a>`:''}</section>`;return}
 if(state.screen==='review'){
-root.innerHTML=`<section class="card"><h2>Перевірка фотозвіту</h2><p><strong>${esc(label(state.store))}</strong></p>${STEPS.map((s,i)=>`<p>${esc(s.title)}: <strong>${state.photos[i].filter(Boolean).length} фото</strong> <button data-edit="${i}">Змінити</button></p>`).join('')}<div class="hint">Фотографії залишаються в оригінальній якості. Максимальний розмір одного фото — 8 МБ. Додаткового стиснення немає.</div></section><div class="footer actions"><button id="back">← Назад</button><button class="primary" id="send">Надіслати контроль</button></div>`;
+root.innerHTML=`<section class="card"><h2>Перевірка фотозвіту</h2><p><strong>${esc(label(state.store))}</strong></p>${STEPS.map((s,i)=>`<p>${esc(s.title)}: <strong>${state.photos[i].filter(Boolean).length} фото</strong> <button data-edit="${i}" ${state.reportId?'disabled':''}>Змінити</button></p>`).join('')}<div class="hint">Фотографії залишаються в оригінальній якості. Фото автоматично оптимізуються для швидшого завантаження.</div></section><div class="footer actions"><button id="back" ${state.reportId?'disabled':''}>← Назад</button><button class="primary" id="send">Надіслати контроль</button></div>`;
 root.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{if(state.reportId)return;state.step=+b.dataset.edit;state.screen='steps';render()});document.getElementById('back').onclick=()=>{if(state.reportId)return;state.screen='steps';state.step=1;render()};document.getElementById('send').onclick=sendReport;return}
 }
+
+// Параметри якості. 0.90 — якість JPEG, а не зменшення розміру на 90%.
+const PHOTO_MAX_WIDTH=3024;
+const PHOTO_MAX_HEIGHT=2268;
+const PHOTO_JPEG_QUALITY=0.90;
+const preparedPhotoCache=new WeakMap();
+
+// Етапи 1–3 та 5 оптимізуються. Close-up (4) і DCOTA (6) — оригінали.
+async function preparePhoto(file,step){
+  if(step===4||step===6||!['image/jpeg','image/png','image/webp'].includes(file.type))return file;
+  if(preparedPhotoCache.has(file))return preparedPhotoCache.get(file);
+  const task=(async()=>{
+    let bitmap;
+    try{
+      bitmap=await createImageBitmap(file,{imageOrientation:'from-image'});
+      const scale=Math.min(1,PHOTO_MAX_WIDTH/bitmap.width,PHOTO_MAX_HEIGHT/bitmap.height);
+      if(scale>=1)return file;
+      const width=Math.max(1,Math.round(bitmap.width*scale));
+      const height=Math.max(1,Math.round(bitmap.height*scale));
+      const canvas=document.createElement('canvas');
+      canvas.width=width;canvas.height=height;
+      const ctx=canvas.getContext('2d');
+      if(!ctx)throw new Error('Canvas недоступний');
+      ctx.imageSmoothingEnabled=true;
+      ctx.imageSmoothingQuality='high';
+      ctx.drawImage(bitmap,0,0,width,height);
+      const blob=await new Promise((resolve,reject)=>canvas.toBlob(
+        result=>result?resolve(result):reject(new Error('Не вдалося підготувати JPEG')),
+        'image/jpeg',PHOTO_JPEG_QUALITY
+      ));
+      canvas.width=0;canvas.height=0;
+      // Якщо оптимізація не зменшує файл, зберігаємо оригінал.
+      if(blob.size>=file.size)return file;
+      return new File([blob],file.name.replace(/\.[^.]+$/,'')+'.jpg',{
+        type:'image/jpeg',lastModified:file.lastModified
+      });
+    }catch(error){
+      console.warn('Оптимізація недоступна, використовується оригінал:',error);
+      return file;
+    }finally{if(bitmap)bitmap.close()}
+  })();
+  preparedPhotoCache.set(file,task);
+  return task;
+}
+
 
 function getInitData(){return window.Telegram?.WebApp?.initData||''}
 function reportDate(){const d=new Date();return `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}.${d.getFullYear()}`}
@@ -40,33 +85,88 @@ async function requestPromo(path,data){
   const j=await r.json();if(!r.ok||j.success!==true)throw Error(j.error||'Сервер не підтвердив операцію');return j;
  }finally{clearTimeout(timer)}
 }
+const PARALLEL_UPLOADS=2;
+const MAX_ATTEMPTS=3;
+const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const uploadedFiles=new Map();
+const uploadIdentifiers=new Map();
+function uploadIdFor(key,file){
+ const saved=uploadIdentifiers.get(key);
+ if(saved&&saved.file===file)return saved.id;
+ const id=newId();uploadIdentifiers.set(key,{file,id});uploadedFiles.delete(key);return id;
+}
 async function sendReport(){
  if(state.uploading)return;
- if(!getInitData()){alert('Відкрийте додаток через Telegram-бота.');return}
+ const initData=getInitData();
+ if(!initData){alert('Відкрийте додаток через кнопку Telegram-бота.');return}
  if(!state.store||state.photos.some(a=>a.filter(Boolean).length<2))return;
- const files=state.photos.flatMap((a,i)=>a.map((f,j)=>({f,i,j})).filter(x=>x.f));
+ const files=state.photos.flatMap((a,i)=>a.map((file,j)=>file?{file,step:i+1,number:j+1,key:`${i+1}:${j+1}`}:null).filter(Boolean));
  state.uploading=true;state.error='';state.screen='upload';
- if(!state.reportId){state.reportId=newId();state.reportDate=reportDate()}
+ if(!state.reportId){state.reportId=newId();state.reportDate=new Intl.DateTimeFormat('uk-UA',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',year:'numeric'}).format(new Date())}
  try{
-  for(const item of files){
-   const key=item.i+':'+item.j;if(state.uploaded.has(key))continue;
-   if(!['image/jpeg','image/png','image/webp'].includes(item.f.type))throw Error('Підтримуються лише JPEG, PNG та WebP');
-   if(item.f.size>8000000)throw Error('Фото '+(item.j+1)+' перевищує 8 МБ. Оригінал не змінено.');
-   state.progress=`Збережено ${state.uploaded.size} із ${files.length} фото`;render();
-   if(!state.uploadIds.has(key))state.uploadIds.set(key,newId());
-   const ext=item.f.type==='image/png'?'png':item.f.type==='image/webp'?'webp':'jpg';
-   await requestPromo('/promo/upload',{
-    storeName:label(state.store),reportDate:state.reportDate,
-    fileName:(item.i===0?'Promo_A5_':'Price_Tag_')+(item.j+1)+'.'+ext,
-    uploadId:state.uploadIds.get(key),mimeType:item.f.type,base64Data:await base64(item.f)
-   });
-   state.uploaded.add(key);
+  state.progress='Перевірка Telegram…';render();
+  await apiPostPromo('/auth',{initData},15000);
+  files.forEach(item=>{item.uploadId=uploadIdFor(item.key,item.file)});
+  const pending=files.filter(item=>uploadedFiles.get(item.key)!==item.file);
+  let completed=files.length-pending.length,nextIndex=0;
+  const errors=[];
+  const progress=(message='')=>{state.progress=`Збережено ${completed} із ${files.length} фото. До ${PARALLEL_UPLOADS} одночасних завантажень. ${message}`;render()};
+  progress('Не закривайте Telegram.');
+  async function uploadWorker(){
+   while(nextIndex<pending.length){
+    const item=pending[nextIndex++];
+    const {file,step,number,key,uploadId}=item;
+    let lastError;
+    try{
+     const prepared=await preparePhoto(file,step);
+     if(prepared.size>8*1024*1024||4*Math.ceil(prepared.size/3)>11000000){throw new Error('Файл перевищує ліміт передавання (близько 7,8 МБ)')}
+     const base64Data=await fileToBase64Promo(prepared);
+     const ext=prepared.type==='image/png'?'png':prepared.type==='image/webp'?'webp':'jpg';
+     const fileName=(step===1?'Promo_A5_':'Price_Tag_')+number+'.'+ext;
+     for(let attempt=1;attempt<=MAX_ATTEMPTS;attempt++){
+      try{
+       await apiPostPromo('/promo/upload',{initData,storeName:label(state.store),reportDate:state.reportDate,fileName,mimeType:prepared.type||'image/jpeg',uploadId,base64Data});
+       uploadedFiles.set(key,file);completed++;progress('Не закривайте Telegram.');lastError=null;break;
+      }catch(error){
+       lastError=error;
+       if(!error.retryable||attempt===MAX_ATTEMPTS)break;
+       progress(`Повторна спроба для фото ${number} (етап ${step})…`);
+       await wait(1500*Math.pow(2,attempt-1)+Math.random()*800);
+      }
+     }
+    }catch(error){lastError=error}
+    if(lastError)errors.push(`Етап ${step}, фото ${number}: ${lastError.message}`);
+   }
   }
-  state.progress='Реєструємо фотозвіт...';render();
-  const result=await requestPromo('/promo/complete',{reportId:state.reportId,apid:state.store.id,storeName:label(state.store),reportDate:state.reportDate});
-  state.folderUrl=result.folderUrl;state.screen='done';
- }catch(e){state.error=e.name==='AbortError'?'Сервер довго не відповідає':e.message||'Помилка'}
+  await Promise.all(Array.from({length:Math.min(PARALLEL_UPLOADS,pending.length)},()=>uploadWorker()));
+  if(errors.length){
+   state.error=`Не підтверджено ${errors.length} фото. ${errors[0]}. Натисніть «Повторити непідтверджені».`;
+   progress('');
+  }else{
+   state.progress='Усі фотографії збережено. Реєструємо фотозвіт у Google Таблиці…';render();
+   try{
+    const result=await apiPostPromo('/promo/complete',{initData,reportId:state.reportId,apid:String(state.store.id),storeName:label(state.store),reportDate:state.reportDate});
+    state.folderUrl=result.folderUrl||'';state.screen='done';
+   }catch(error){state.error=`Усі фото збережено, але реєстрацію не підтверджено: ${error.message}. Натисніть повторно — фотографії вдруге не завантажаться.`}
+  }
+ }catch(error){state.error=`Не вдалося виконати запит: ${error.message}`}
  finally{state.uploading=false;render()}
+}
+function fileToBase64Promo(file){
+ return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onerror=()=>reject(new Error('Не вдалося прочитати файл'));reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.readAsDataURL(file)})
+}
+async function apiPostPromo(path,payload,timeoutMs=55000){
+ const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),timeoutMs);
+ try{
+  const response=await fetch(API_URL+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal});
+  let data;try{data=await response.json()}catch{throw Object.assign(new Error('Сервер повернув некоректну відповідь'),{retryable:response.status>=500})}
+  if(!response.ok||!data.success)throw Object.assign(new Error(data.error||`Помилка сервера (${response.status})`),{retryable:data.retryable===true||response.status===429||response.status>=500,status:response.status});
+  return data;
+ }catch(error){
+  if(error.name==='AbortError')throw Object.assign(new Error('Час очікування відповіді минув'),{retryable:true});
+  if(error instanceof TypeError)throw Object.assign(new Error('Помилка мережі'),{retryable:true});
+  throw error;
+ }finally{clearTimeout(timer)}
 }
 
 function showStores(query){const q=query.trim().toLocaleLowerCase();const matches=STORES.filter(s=>label(s).toLocaleLowerCase().includes(q)).sort((a,b)=>label(a).localeCompare(label(b),'uk'));const el=document.getElementById('storeResults');el.innerHTML=matches.map(s=>`<button type="button" data-id="${s.id}">${esc(label(s))}</button>`).join('')||'<p class="muted">Магазин не знайдено</p>';el.querySelectorAll('[data-id]').forEach(b=>b.onclick=()=>{state.store=STORES.find(s=>s.id===b.dataset.id);document.getElementById('search').value=label(state.store);document.getElementById('selected').textContent=label(state.store);document.getElementById('next').disabled=false;el.innerHTML=''})}
