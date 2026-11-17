@@ -27,7 +27,7 @@ if(state.error)document.getElementById('retry').onclick=sendReport;return}
 if(state.screen==='done'){
 root.innerHTML=`<section class="card"><h2>Звіт надіслано ✓</h2><p>Звіт зареєстровано в Apple Promo Control.</p>${state.folderUrl?`<a target="_blank" rel="noopener" href="${esc(state.folderUrl)}">Відкрити Google Drive</a>`:''}</section>`;return}
 if(state.screen==='review'){
-root.innerHTML=`<section class="card"><h2>Перевірка фотозвіту</h2><p><strong>${esc(label(state.store))}</strong></p>${STEPS.map((s,i)=>`<p>${esc(s.title)}: <strong>${state.photos[i].filter(Boolean).length} фото</strong> <button data-edit="${i}" ${state.reportId?'disabled':''}>Змінити</button></p>`).join('')}<div class="hint">Фотографії залишаються в оригінальній якості. Фото автоматично оптимізуються для швидшого завантаження.</div></section><section class="card"><h2>Тест Gemini</h2><p>Промографіка А5 зберігається у Google Drive без аналізу ШІ. Gemini перевіряє лише додані фото цінників. Це тест розпізнавання без порівняння з промофайлом і без запису в таблицю.</p><button id="aiTest" ${state.uploading?'disabled':''}>🤖 Перевірити цінники через ШІ</button><div id="aiResult" class="ai-result" role="status" aria-live="polite" hidden></div></section><div class="footer actions"><button id="back" ${state.reportId?'disabled':''}>← Назад</button><button class="primary" id="send" ${state.uploading?'disabled':''}>Надіслати звіт</button></div>`;
+root.innerHTML=`<section class="card"><h2>Перевірка фотозвіту</h2><p><strong>${esc(label(state.store))}</strong></p>${STEPS.map((s,i)=>`<p>${esc(s.title)}: <strong>${state.photos[i].filter(Boolean).length} фото</strong> <button data-edit="${i}" ${state.reportId?'disabled':''}>Змінити</button></p>`).join('')}<div class="hint">Фотографії залишаються в оригінальній якості. Фото автоматично оптимізуються для швидшого завантаження.</div></section><section class="card"><h2>Тест Gemini</h2><p>Gemini перевіряє дати дії промографіки А5 та розпізнає моделі й ціни на цінниках. Це тест без запису результатів у Google Таблицю та без звіряння цін із промофайлом.</p><button id="aiTest" ${state.uploading?'disabled':''}>🤖 Перевірити А5 та цінники через ШІ</button><div id="aiResult" class="ai-result" role="status" aria-live="polite" hidden></div></section><div class="footer actions"><button id="back" ${state.reportId?'disabled':''}>← Назад</button><button class="primary" id="send" ${state.uploading?'disabled':''}>Надіслати звіт</button></div>`;
 root.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{if(state.reportId)return;state.step=+b.dataset.edit;state.screen='steps';render()});
 document.getElementById('back').onclick=()=>{if(state.reportId)return;state.screen='steps';state.step=1;render()};
 document.getElementById('send').onclick=sendReport;
@@ -35,22 +35,53 @@ document.getElementById('aiTest').onclick=testAllPromoPhotos;
 return}
 }
 
+// Дата тестової перевірки — дата звіту, якщо вже зафіксована,
+// або поточна календарна дата в Україні.
+function aiReportDate(){
+ return state.reportDate || new Intl.DateTimeFormat('uk-UA',{
+  timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',year:'numeric'
+ }).format(new Date());
+}
+function parseAiDate(value,reportYear){
+ if(value==null||String(value).trim()==='')return {date:null,missing:true};
+ const text=String(value).trim();
+ const m=text.match(/^(\d{1,2})[.\/-](\d{1,2})(?:[.\/-](\d{4}))?\.?$/);
+ if(!m)return {date:null,missing:false};
+ const day=Number(m[1]),month=Number(m[2]),year=m[3]?Number(m[3]):reportYear;
+ const d=new Date(Date.UTC(year,month-1,day));
+ if(d.getUTCFullYear()!==year||d.getUTCMonth()!==month-1||d.getUTCDate()!==day)return {date:null,missing:false};
+ return {date:d,missing:false,yearExplicit:!!m[3]};
+}
+function checkAiA5(item,dateText){
+ const m=dateText.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+ if(!m)return 'Потрібна ручна перевірка: дата звіту невідома';
+ const report=new Date(Date.UTC(+m[3],+m[2]-1,+m[1]));
+ const start=parseAiDate(item.startDate,+m[3]);
+ const end=parseAiDate(item.endDate,+m[3]);
+ if(!start.date&&!end.date)return 'Потрібна ручна перевірка: дату акції не розпізнано';
+ if((!start.missing&&!start.date)||(!end.missing&&!end.date))return 'Потрібна ручна перевірка: некоректна дата';
+ if(String(item.confidence||'').toLowerCase()!=='high')return 'Потрібна ручна перевірка: недостатня впевненість Gemini';
+ // Без явно вказаного року перехід грудень/січень неоднозначний.
+ if(start.date&&end.date&&start.date>end.date)return 'Потрібна ручна перевірка: неоднозначний період';
+ if(start.date&&report<start.date)return 'Неактуальна — акція ще не почалася. Приберіть або замініть А5';
+ if(end.date&&report>end.date)return 'Неактуальна — термін акції минув. Приберіть або замініть А5';
+ return 'Актуальна';
+}
 async function testAllPromoPhotos(){
  const button=document.getElementById('aiTest');
  const result=document.getElementById('aiResult');
  const initData=getInitData();
  if(!initData){alert('Відкрийте застосунок через Telegram-бота.');return}
- // Промографіка А5 (state.photos[0]) ніколи не надсилається до Gemini.
- // Її звичайне завантаження в Google Drive залишається без змін.
- const photos=state.photos[1].map((file,index)=>file?{
-  file,step:2,number:index+1,
-  category:'Цінники промопозицій',
-  photoCategory:'price_tag'
- }:null).filter(Boolean);
- if(!photos.length){alert('Спочатку додайте фотографії цінників.');return}
+ const photos=state.photos.flatMap((section,i)=>section.map((file,index)=>file?{
+  file,step:i+1,number:index+1,
+  category:i===0?'Промографіка А5':'Цінники промопозицій',
+  photoCategory:i===0?'a5_graphic':'price_tag'
+ }:null).filter(Boolean));
+ if(!photos.length){alert('Спочатку додайте фотографії.');return}
  button.disabled=true;
  result.hidden=false;
- const lines=[];
+ const dateText=aiReportDate();
+ const lines=[`Дата фотозвіту для тесту: ${dateText}`];
  let success=0,failed=0,totalItems=0;
  const totals={input:0,output:0,all:0};
  const usageKnown={input:false,output:false,all:false};
@@ -62,7 +93,7 @@ async function testAllPromoPhotos(){
    show(`Перевіряємо ${i+1} із ${photos.length}: ${heading}…`);
    try{
     const prepared=await preparePhoto(photo.file,photo.step);
-    if(prepared.size>8*1024*1024 || 4*Math.ceil(prepared.size/3)>11000000){
+    if(prepared.size>8*1024*1024||4*Math.ceil(prepared.size/3)>11000000){
      throw new Error('Фото перевищує ліміт тестового запиту (приблизно 7,8 МБ).');
     }
     const base64Data=await fileToBase64Promo(prepared);
@@ -72,44 +103,39 @@ async function testAllPromoPhotos(){
     },59000);
     const analysis=response.analysis||{};
     const items=Array.isArray(analysis.items)?analysis.items:[];
-    totalItems+=items.length;
-    success++;
+    totalItems+=items.length;success++;
     const part=[`✓ ${heading}`,
-     `Категорія в застосунку: ${photo.category}`,
      `Тип за Gemini: ${analysis.photoType||'не визначено'}`,
      `Розпізнано позицій: ${items.length}`];
     items.forEach((item,index)=>{
      const fields=[`${index+1}. ${item.model||'Модель не розпізнано'}`];
-     if(item.sizeMm!=null)fields.push(`${item.sizeMm} мм`);
-     if(item.storageGb!=null)fields.push(`${item.storageGb} ГБ`);
-     if(item.color)fields.push(String(item.color));
-     fields.push(`Ціна: ${item.priceUah!=null?item.priceUah+' грн':'не розпізнано'}`);
+     if(photo.photoCategory==='a5_graphic'){
+      fields.push(`Початок: ${item.startDate||'не вказано'}`);
+      fields.push(`Завершення: ${item.endDate||'не вказано'}`);
+      fields.push(`Статус: ${checkAiA5(item,dateText)}`);
+     }else{
+      if(item.sizeMm!=null)fields.push(`${item.sizeMm} мм`);
+      if(item.storageGb!=null)fields.push(`${item.storageGb} ГБ`);
+      if(item.color)fields.push(String(item.color));
+      fields.push(`Ціна: ${item.priceUah!=null?item.priceUah+' грн':'не розпізнано'}`);
+     }
      if(item.note)fields.push(`Примітка: ${item.note}`);
      part.push(fields.join(' | '));
     });
-    if(Array.isArray(analysis.warnings)&&analysis.warnings.length){
-     part.push('Попередження: '+analysis.warnings.join('; '));
-    }
+    if(!items.length&&photo.photoCategory==='a5_graphic')part.push('Потрібна ручна перевірка: графіку не розпізнано');
+    if(Array.isArray(analysis.warnings)&&analysis.warnings.length)part.push('Попередження: '+analysis.warnings.join('; '));
     const usage=response.usage||{};
-    const tokenFields=[['inputTokens','input'],['outputTokens','output'],['totalTokens','all']];
-    tokenFields.forEach(([field,key])=>{
-     if(typeof usage[field]==='number'){
-      totals[key]+=usage[field];usageKnown[key]=true;
-     }
+    [['inputTokens','input'],['outputTokens','output'],['totalTokens','all']].forEach(([field,key])=>{
+     if(typeof usage[field]==='number'){totals[key]+=usage[field];usageKnown[key]=true}
     });
     part.push(`Токени фото: вхідні ${usage.inputTokens??'н/д'}, вихідні ${usage.outputTokens??'н/д'}, усього ${usage.totalTokens??'н/д'}`);
     lines.push(part.join('\n'));
    }catch(error){
-    failed++;
-    lines.push(`✕ ${heading}\nПомилка: ${error.message}`);
-    // Не зупиняємо тест інших фото, якщо одна фотографія не обробилась.
-    if(error.status===429){
-     lines.push('Досягнуто ліміту Gemini. Решту фото зараз не перевіряємо.');
-     break;
-    }
+    failed++;lines.push(`✕ ${heading}\nПомилка: ${error.message}`);
+    if(error.status===429){lines.push('Досягнуто ліміту Gemini. Решту фото зараз не перевіряємо.');break}
    }
   }
-  lines.push(`ПІДСУМОК\nПеревірено успішно: ${success}\nПомилок: ${failed}\nРозпізнано позицій: ${totalItems}\nТокени загалом: вхідні ${usageKnown.input?totals.input:'н/д'}, вихідні ${usageKnown.output?totals.output:'н/д'}, усього ${usageKnown.all?totals.all:'н/д'}`);
+  lines.push(`ПІДСУМОК\nПеревірено успішно: ${success}\nПомилок запитів: ${failed}\nРозпізнано позицій: ${totalItems}\nТокени загалом: вхідні ${usageKnown.input?totals.input:'н/д'}, вихідні ${usageKnown.output?totals.output:'н/д'}, усього ${usageKnown.all?totals.all:'н/д'}`);
   result.textContent=lines.join('\n\n');
  }finally{button.disabled=false}
 }
