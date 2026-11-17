@@ -68,75 +68,59 @@ function checkAiA5(item,dateText){
  if(end.date&&report>end.date)return 'Неактуальна — термін акції минув. Приберіть або замініть А5';
  return 'Актуальна';
 }
+// У тесті та у звіті фото передаються Gemini парами в межах однієї категорії.
+async function analyzePromoGroup(group,initData){
+ const images=[];
+ for(const photo of group){
+  const prepared=await preparePhoto(photo.file,photo.step);
+  if(prepared.size>8*1024*1024)throw new Error('Фото перевищує ліміт аналізу');
+  images.push({mimeType:prepared.type||'image/jpeg',base64Data:await fileToBase64Promo(prepared)});
+ }
+ // Worker приймає до 12 МБ JSON. Великі пари безпечно перевіряємо по одному.
+ const totalBase64=images.reduce((n,x)=>n+x.base64Data.length,0);
+ if(images.length===2 && totalBase64>10800000){
+  const left=await analyzePromoGroup([group[0]],initData);
+  const right=await analyzePromoGroup([group[1]],initData);
+  return [{photo:group[0],items:left[0].items,usage:left[0].usage},{photo:group[1],items:right[0].items,usage:right[0].usage}];
+ }
+ const answer=await apiPostPromo('/promo/ai-test',{
+  initData,photoCategory:group[0].step===1?'a5_graphic':'price_tag',images
+ },59000);
+ if(!Array.isArray(answer.results)||answer.results.length!==group.length)throw new Error('Gemini повернув неповну відповідь');
+ return group.map((photo,i)=>({photo,items:answer.results[i].items, warnings:answer.results[i].warnings||[],usage:i===0?answer.usage:null}));
+}
+function promoGroups(photos){
+ const result=[];
+ for(const step of [1,2]){
+  const group=photos.filter(p=>p.step===step);
+  for(let i=0;i<group.length;i+=2)result.push(group.slice(i,i+2));
+ }
+ return result;
+}
 async function testAllPromoPhotos(){
- const button=document.getElementById('aiTest');
- const result=document.getElementById('aiResult');
- const initData=getInitData();
+ const button=document.getElementById('aiTest'),result=document.getElementById('aiResult'),initData=getInitData();
  if(!initData){alert('Відкрийте застосунок через Telegram-бота.');return}
- const photos=state.photos.flatMap((section,i)=>section.map((file,index)=>file?{
-  file,step:i+1,number:index+1,
-  category:i===0?'Промографіка А5':'Цінники промопозицій',
-  photoCategory:i===0?'a5_graphic':'price_tag'
- }:null).filter(Boolean));
- if(!photos.length){alert('Спочатку додайте фотографії.');return}
- button.disabled=true;
- result.hidden=false;
- const dateText=aiReportDate();
- const lines=[`Дата фотозвіту для тесту: ${dateText}`];
- let success=0,failed=0,totalItems=0;
- const totals={input:0,output:0,all:0};
- const usageKnown={input:false,output:false,all:false};
- const show=message=>{result.textContent=[...lines,message].filter(Boolean).join('\n\n')};
+ const photos=state.photos.flatMap((section,i)=>section.map((file,index)=>file?{file,step:i+1,number:index+1}:null).filter(Boolean));
+ const groups=promoGroups(photos);button.disabled=true;result.hidden=false;
+ const lines=[`Дата фотозвіту: ${aiReportDate()}`];let ok=0,failed=0,itemsCount=0;
+ const tokens={input:0,output:0,total:0};
  try{
-  for(let i=0;i<photos.length;i++){
-   const photo=photos[i];
-   const heading=`${photo.category} — фото ${photo.number}`;
-   show(`Перевіряємо ${i+1} із ${photos.length}: ${heading}…`);
+  for(let i=0;i<groups.length;i++){
+   const group=groups[i];result.textContent=lines.join('\n\n')+`\n\nПеревірка групи ${i+1} із ${groups.length} (${group.length} фото)…`;
    try{
-    const prepared=await preparePhoto(photo.file,photo.step);
-    if(prepared.size>8*1024*1024||4*Math.ceil(prepared.size/3)>11000000){
-     throw new Error('Фото перевищує ліміт тестового запиту (приблизно 7,8 МБ).');
+    const rows=await analyzePromoGroup(group,initData);
+    for(const row of rows){
+     ok++;itemsCount+=row.items.length;
+     const heading=`${row.photo.step===1?'А5':'Цінники'}, фото ${row.photo.number}`;
+     const details=row.items.map((x,j)=>row.photo.step===1?
+      `${j+1}. ${x.model||'Модель невідома'} | ${x.startDate||'—'} — ${x.endDate||'—'} | ${checkAiA5(x,aiReportDate())}`:
+      `${j+1}. ${x.model||'Модель невідома'} | ${x.priceUah??'Ціна невідома'} грн`);
+     lines.push(`✓ ${heading}\nРозпізнано: ${row.items.length}${details.length?'\n'+details.join('\n'):''}`);
+     if(row.usage){tokens.input+=row.usage.inputTokens||0;tokens.output+=row.usage.outputTokens||0;tokens.total+=row.usage.totalTokens||0}
     }
-    const base64Data=await fileToBase64Promo(prepared);
-    const response=await apiPostPromo('/promo/ai-test',{
-     initData,mimeType:prepared.type||'image/jpeg',base64Data,
-     photoCategory:photo.photoCategory
-    },59000);
-    const analysis=response.analysis||{};
-    const items=Array.isArray(analysis.items)?analysis.items:[];
-    totalItems+=items.length;success++;
-    const part=[`✓ ${heading}`,
-     `Тип за Gemini: ${analysis.photoType||'не визначено'}`,
-     `Розпізнано позицій: ${items.length}`];
-    items.forEach((item,index)=>{
-     const fields=[`${index+1}. ${item.model||'Модель не розпізнано'}`];
-     if(photo.photoCategory==='a5_graphic'){
-      fields.push(`Початок: ${item.startDate||'не вказано'}`);
-      fields.push(`Завершення: ${item.endDate||'не вказано'}`);
-      fields.push(`Статус: ${checkAiA5(item,dateText)}`);
-     }else{
-      if(item.sizeMm!=null)fields.push(`${item.sizeMm} мм`);
-      if(item.storageGb!=null)fields.push(`${item.storageGb} ГБ`);
-      if(item.color)fields.push(String(item.color));
-      fields.push(`Ціна: ${item.priceUah!=null?item.priceUah+' грн':'не розпізнано'}`);
-     }
-     if(item.note)fields.push(`Примітка: ${item.note}`);
-     part.push(fields.join(' | '));
-    });
-    if(!items.length&&photo.photoCategory==='a5_graphic')part.push('Потрібна ручна перевірка: графіку не розпізнано');
-    if(Array.isArray(analysis.warnings)&&analysis.warnings.length)part.push('Попередження: '+analysis.warnings.join('; '));
-    const usage=response.usage||{};
-    [['inputTokens','input'],['outputTokens','output'],['totalTokens','all']].forEach(([field,key])=>{
-     if(typeof usage[field]==='number'){totals[key]+=usage[field];usageKnown[key]=true}
-    });
-    part.push(`Токени фото: вхідні ${usage.inputTokens??'н/д'}, вихідні ${usage.outputTokens??'н/д'}, усього ${usage.totalTokens??'н/д'}`);
-    lines.push(part.join('\n'));
-   }catch(error){
-    failed++;lines.push(`✕ ${heading}\nПомилка: ${error.message}`);
-    if(error.status===429){lines.push('Досягнуто ліміту Gemini. Решту фото зараз не перевіряємо.');break}
-   }
+   }catch(e){failed+=group.length;group.forEach(p=>lines.push(`✕ Етап ${p.step}, фото ${p.number}: ${e.message}`));if(e.status===429)break}
   }
-  lines.push(`ПІДСУМОК\nПеревірено успішно: ${success}\nПомилок запитів: ${failed}\nРозпізнано позицій: ${totalItems}\nТокени загалом: вхідні ${usageKnown.input?totals.input:'н/д'}, вихідні ${usageKnown.output?totals.output:'н/д'}, усього ${usageKnown.all?totals.all:'н/д'}`);
+  lines.push(`ПІДСУМОК\nУспішно: ${ok} фото\nПомилки: ${failed} фото\nПозицій: ${itemsCount}\nТокени: вхідні ${tokens.input}, вихідні ${tokens.output}, усього ${tokens.total}`);
   result.textContent=lines.join('\n\n');
  }finally{button.disabled=false}
 }
@@ -280,55 +264,22 @@ async function sendReport(){
 // Якщо одна фотографія не розпізнана, зберігаємо часткові результати
 // й позначаємо звіт як такий, що потребує ручної перевірки.
 async function collectPromoAnalysis(files,initData){
- const payload={
-  reportId:state.reportId,apid:String(state.store.id),reportDate:state.reportDate,
-  a5Items:[],priceItems:[],photoErrors:[],
-  checkedA5Photos:0,checkedPricePhotos:0,
-  totalA5Photos:files.filter(x=>x.step===1).length,
-  totalPricePhotos:files.filter(x=>x.step===2).length
- };
- for(let i=0;i<files.length;i++){
-  const photo=files[i];
-  state.progress=`Фотографії збережено. Перевірка Gemini: ${i+1} із ${files.length}…`;
-  render();
+ const payload={reportId:state.reportId,apid:String(state.store.id),reportDate:state.reportDate,
+  a5Items:[],priceItems:[],photoErrors:[],checkedA5Photos:0,checkedPricePhotos:0,
+  totalA5Photos:files.filter(x=>x.step===1).length,totalPricePhotos:files.filter(x=>x.step===2).length};
+ const groups=promoGroups(files);
+ for(let i=0;i<groups.length;i++){
+  const group=groups[i];state.progress=`Фотографії збережено. Перевірка Gemini: група ${i+1} із ${groups.length}…`;render();
   try{
-   const prepared=await preparePhoto(photo.file,photo.step);
-   if(prepared.size>8*1024*1024||4*Math.ceil(prepared.size/3)>11000000)
-    throw new Error('Фотографія перевищує ліміт аналізу');
-   const base64Data=await fileToBase64Promo(prepared);
-   const answer=await apiPostPromo('/promo/ai-test',{
-    initData,mimeType:prepared.type||'image/jpeg',base64Data,
-    photoCategory:photo.step===1?'a5_graphic':'price_tag'
-   },59000);
-   const analysis=answer.analysis||{};
-   if(!Array.isArray(analysis.items))throw new Error('Gemini не повернув перелік позицій');
-   const items=analysis.items;
-   // Порожня відповідь не є успішним розпізнаванням.
-   if(!items.length)throw new Error('На фотографії не розпізнано позицій');
-   if(photo.step===1){
-    payload.checkedA5Photos++;
-    payload.a5Items.push(...items.map(item=>({
-     model:item.model??null,startDate:item.startDate??null,
-     endDate:item.endDate??null,confidence:item.confidence??'low',
-     note:item.note??''
-    })));
-   }else{
-    payload.checkedPricePhotos++;
-    payload.priceItems.push(...items.map(item=>({
-     model:item.model??null,sizeMm:item.sizeMm??null,
-     storageGb:item.storageGb??null,color:item.color??null,
-     priceUah:item.priceUah??null,priceType:item.priceType??'unknown',
-     confidence:item.confidence??'low',note:item.note??''
-    })));
+   const rows=await analyzePromoGroup(group,initData);
+   for(const {photo,items} of rows){
+    if(!Array.isArray(items)||!items.length){payload.photoErrors.push(`Етап ${photo.step}, фото ${photo.number}: позицій не розпізнано`);continue}
+    if(photo.step===1){payload.checkedA5Photos++;payload.a5Items.push(...items.map(x=>({model:x.model??null,startDate:x.startDate??null,endDate:x.endDate??null,confidence:x.confidence??'low',note:x.note??''})))}
+    else{payload.checkedPricePhotos++;payload.priceItems.push(...items.map(x=>({model:x.model??null,sizeMm:x.sizeMm??null,storageGb:x.storageGb??null,color:x.color??null,priceUah:x.priceUah??null,priceType:x.priceType??'unknown',confidence:x.confidence??'low',note:x.note??''})))}
    }
-  }catch(error){
-   payload.photoErrors.push(`Етап ${photo.step}, фото ${photo.number}: ${String(error.message||error).slice(0,180)}`);
-   // При ліміті запитів не робимо решту безнадійних викликів.
-   if(error.status===429){
-    for(const remaining of files.slice(i+1))
-     payload.photoErrors.push(`Етап ${remaining.step}, фото ${remaining.number}: ліміт Gemini`);
-    break;
-   }
+  }catch(e){
+   group.forEach(p=>payload.photoErrors.push(`Етап ${p.step}, фото ${p.number}: ${String(e.message||e).slice(0,180)}`));
+   if(e.status===429){for(const rest of groups.slice(i+1))for(const p of rest)payload.photoErrors.push(`Етап ${p.step}, фото ${p.number}: ліміт Gemini`);break}
   }
  }
  return payload;
