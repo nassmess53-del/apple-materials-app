@@ -234,6 +234,7 @@ function uploadIdFor(key,file){
 }
 async function sendReport(){
  if(state.uploading)return;
+ if(!allPromoPhotosReady()){alert('Спочатку перевірте читабельність усіх фотографій.');return;}
  const initData=getInitData();
  if(!initData){alert('Відкрийте додаток через кнопку Telegram-бота.');return}
  if(!state.store||state.photos.some((a,i)=>a.filter(Boolean).length<(i===0?MIN_A5_PHOTOS:MIN_PHOTOS_PER_SECTION)||a.filter(Boolean).length>MAX_PHOTOS_PER_SECTION))return;
