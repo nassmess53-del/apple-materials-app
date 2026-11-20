@@ -10,8 +10,9 @@ const API_URL='https://apple-photo-reports.nass-mess53.workers.dev';
 const root=document.getElementById('root');
 // Результати прив'язані до об'єктів File: заміна фото автоматично скасовує стару перевірку.
 const promoPrecheckCache=new WeakMap();
+const recordedGeminiCalls=new Set();
 let promoChecking=false;
-const state={screen:'store',store:null,step:0,photos:[[null],[null]],previews:new Map(),reportId:null,reportDate:null,uploadIds:new Map(),uploaded:new Set(),uploading:false,error:'',progress:'',folderUrl:'',analysisPayload:null,analysisSaved:false,analysisError:'',analysisStatus:''};
+const state={screen:'store',store:null,step:0,photos:[[null],[null]],previews:new Map(),reportId:null,reportDate:null,uploadIds:new Map(),uploaded:new Set(),uploading:false,error:'',progress:'',folderUrl:'',analysisPayload:null,analysisSaved:false,analysisError:'',analysisStatus:'',tokenUsageSaved:false,tokenUsageError:'',tokenUsage:{inputTokens:0,outputTokens:0,thinkingTokens:0,totalTokens:0,apiRequests:0,retries:0,incomplete:false}};
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const label=s=>`${s.name} APID${s.id}`;
 function preview(f){if(!state.previews.has(f))state.previews.set(f,URL.createObjectURL(f));return state.previews.get(f)}
@@ -93,6 +94,24 @@ async function analyzePromoGroup(group,initData){
  if(!Array.isArray(answer.results)||answer.results.length!==group.length)throw new Error('Gemini повернув неповну відповідь');
  return group.map((photo,i)=>({photo,items:answer.results[i].items, warnings:answer.results[i].warnings||[],usage:i===0?answer.usage:null}));
 }
+// Накопичуємо підтверджені токени кожного звернення до Gemini,
+// навіть якщо фотографію згодом замінено.
+function recordGeminiUsage(callId, response, failed=false){
+ if(recordedGeminiCalls.has(callId))return;
+ recordedGeminiCalls.add(callId);
+ const usage=response?.usageAllAttempts||response?.usage||{};
+ const count=Number.isSafeInteger(response?.attempts)?response.attempts:1;
+ const reported=Number.isSafeInteger(response?.usageReports)?response.usageReports:0;
+ const totals=state.tokenUsage;
+ for(const field of ['inputTokens','outputTokens','thinkingTokens','totalTokens']){
+  const value=usage[field];
+  if(Number.isSafeInteger(value)&&value>=0)totals[field]+=value;
+ }
+ totals.apiRequests+=count;
+ totals.retries+=Math.max(0,count-1);
+ if(reported<count||failed&&reported===0)totals.incomplete=true;
+}
+
 function promoGroups(photos){
  const result=[];
  for(const step of [1,2]){
@@ -330,6 +349,23 @@ async function savePromoAnalysisPayload(initData){
  return apiPostPromo('/promo/analysis-save',{initData,...state.analysisPayload},59000);
 }
 
+async function savePromoTokenUsagePayload(initData){
+ if(state.tokenUsageSaved)return;
+ const u=state.tokenUsage;
+ const result=await apiPostPromo('/promo/token-usage',{
+  initData,reportId:state.reportId,apid:String(state.store.id),
+  storeName:label(state.store),model:'gemini-3-flash-preview',
+  photoCount:currentPromoPhotos().length,
+  inputTokens:u.inputTokens,outputTokens:u.outputTokens,
+  thinkingTokens:u.thinkingTokens,totalTokens:u.totalTokens,
+  apiRequests:u.apiRequests,retries:u.retries,
+  status:u.incomplete?'Неповний':'Повний'
+ },59000);
+ state.tokenUsageSaved=true;
+ state.tokenUsageError='';
+ return result;
+}
+
 async function retryPromoAnalysisSave(){
  if(state.uploading||!state.analysisPayload)return;
  state.uploading=true;state.analysisError='';state.screen='upload';
@@ -350,7 +386,7 @@ async function apiPostPromo(path,payload,timeoutMs=55000){
  try{
   const response=await fetch(API_URL+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal});
   let data;try{data=await response.json()}catch{throw Object.assign(new Error('Сервер повернув некоректну відповідь'),{retryable:response.status>=500})}
-  if(!response.ok||!data.success)throw Object.assign(new Error(data.error||`Помилка сервера (${response.status})`),{retryable:data.retryable===true||response.status===429||response.status>=500,status:response.status});
+  if(!response.ok||!data.success)throw Object.assign(new Error(data.error||`Помилка сервера (${response.status})`),{retryable:data.retryable===true||response.status===429||response.status>=500,status:response.status,usageInfo:data});
   return data;
  }catch(error){
   if(error.name==='AbortError')throw Object.assign(new Error('Час очікування відповіді минув'),{retryable:true});
