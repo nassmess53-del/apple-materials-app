@@ -44,10 +44,16 @@ return}
 
 // Дата тестової перевірки — дата звіту, якщо вже зафіксована,
 // або поточна календарна дата в Україні.
-function aiReportDate(){
- return state.reportDate || new Intl.DateTimeFormat('uk-UA',{
+// Формуємо дату для Worker тільки ASCII-цифрами і крапками, незалежно від локалі iPhone.
+function promoKyivDate(){
+ const parts=new Intl.DateTimeFormat('en-GB',{
   timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',year:'numeric'
- }).format(new Date());
+ }).formatToParts(new Date());
+ const values=Object.fromEntries(parts.filter(p=>['day','month','year'].includes(p.type)).map(p=>[p.type,p.value]));
+ return `${values.day}.${values.month}.${values.year}`;
+}
+function aiReportDate(){
+ return state.reportDate || promoKyivDate();
 }
 function parseAiDate(value,reportYear){
  if(value==null||String(value).trim()==='')return {date:null,missing:true};
@@ -268,7 +274,7 @@ async function sendReport(){
  if(!state.store||state.photos.some((a,i)=>a.filter(Boolean).length<(i===0?MIN_A5_PHOTOS:MIN_PHOTOS_PER_SECTION)||a.filter(Boolean).length>MAX_PHOTOS_PER_SECTION))return;
  const files=state.photos.flatMap((a,i)=>a.map((file,j)=>file?{file,step:i+1,number:j+1,key:`${i+1}:${j+1}`}:null).filter(Boolean));
  state.uploading=true;state.error='';state.screen='upload';
- if(!state.reportId){state.reportId=newId();state.reportDate=new Intl.DateTimeFormat('uk-UA',{timeZone:'Europe/Kyiv',day:'2-digit',month:'2-digit',year:'numeric'}).format(new Date())}
+ if(!state.reportId){state.reportId=newId();state.reportDate=promoKyivDate()}
  try{
   state.progress='Перевірка Telegram…';render();
   await apiPostPromo('/auth',{initData},15000);
