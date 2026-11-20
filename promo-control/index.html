@@ -30,8 +30,9 @@ if(state.screen==='upload'){
 root.innerHTML=`<section class="card"><h2>Завантаження</h2><p>${esc(state.progress)}</p>${state.error?`<p style="color:#b42318">${esc(state.error)}</p><button class="primary" id="retry">Повторити непідтверджені</button>`:'<p class="hint">Не закривайте додаток до завершення.</p>'}</section>`;
 if(state.error)document.getElementById('retry').onclick=sendReport;return}
 if(state.screen==='done'){
-root.innerHTML=`<section class="card"><h2>Звіт надіслано ✓</h2><p>Фотографії збережено, звіт зареєстровано в Apple Promo Control.</p><p class="hint">${esc(state.analysisStatus||'Результати перевірки очікуються.')}</p>${state.analysisError?`<p style="color:#b42318">${esc(state.analysisError)}</p><button class="primary" id="retryAnalysis">Повторити запис результатів</button>`:''}${state.folderUrl?`<a target="_blank" rel="noopener" href="${esc(state.folderUrl)}">Відкрити Google Drive</a>`:''}</section>`;
- if(state.analysisError)document.getElementById('retryAnalysis').onclick=retryPromoAnalysisSave;return}
+root.innerHTML=`<section class="card"><h2>Звіт надіслано ✓</h2><p>Фотографії збережено, звіт зареєстровано в Apple Promo Control.</p><p class="hint">${esc(state.analysisStatus||'Результати перевірки очікуються.')}</p>${state.analysisError?`<p style="color:#b42318">${esc(state.analysisError)}</p><button class="primary" id="retryAnalysis">Повторити запис результатів</button>`:''}${state.tokenUsageError?`<p style="color:#b42318">${esc(state.tokenUsageError)}</p><button class="primary" id="retryTokens">Повторити запис токенів</button>`:''}${state.folderUrl?`<a target="_blank" rel="noopener" href="${esc(state.folderUrl)}">Відкрити Google Drive</a>`:''}</section>`;
+ if(state.analysisError)document.getElementById('retryAnalysis').onclick=retryPromoAnalysisSave;
+ if(state.tokenUsageError)document.getElementById('retryTokens').onclick=retryPromoTokenUsageSave;return}
 if(state.screen==='review'){
 root.innerHTML=`<section class="card"><h2>Перевірка фотозвіту</h2><p><strong>${esc(label(state.store))}</strong></p>${STEPS.map((s,i)=>`<p>${esc(s.title)}: <strong>${state.photos[i].filter(Boolean).length} фото</strong> <button data-edit="${i}" ${state.reportId?'disabled':''}>Змінити</button></p>`).join('')}<div class="hint">Фото можуть оптимізуватися перед передаванням згідно з поточними налаштуваннями застосунку.</div></section><section class="card"><h2>Перевірка читабельності перед надсиланням</h2><p>Gemini один раз зчитує моделі, ціни та дати А5. Якщо цінник не читається, замініть лише відповідне фото. Промоціни порівнює Apps Script після надсилання.</p><button id="aiTest" ${state.uploading||promoChecking?'disabled':''}>🤖 Перевірити фотографії</button><div id="aiResult" class="ai-result" role="status" aria-live="polite" hidden></div></section><div class="footer actions"><button id="back" ${state.reportId?'disabled':''}>← Назад</button><button class="primary" id="send" ${state.uploading||promoChecking||!allPromoPhotosReady()?'disabled':''}>Надіслати звіт</button></div>`;
 root.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{if(state.reportId)return;state.step=+b.dataset.edit;state.screen='steps';render()});
@@ -88,9 +89,17 @@ async function analyzePromoGroup(group,initData){
   const right=await analyzePromoGroup([group[1]],initData);
   return [{photo:group[0],items:left[0].items,usage:left[0].usage},{photo:group[1],items:right[0].items,usage:right[0].usage}];
  }
- const answer=await apiPostPromo('/promo/ai-test',{
-  initData,photoCategory:group[0].step===1?'a5_graphic':'price_tag',images
- },59000);
+ const callId=newId();
+ let answer;
+ try{
+  answer=await apiPostPromo('/promo/ai-test',{
+   initData,photoCategory:group[0].step===1?'a5_graphic':'price_tag',images
+  },59000);
+  recordGeminiUsage(callId,answer);
+ }catch(error){
+  recordGeminiUsage(callId,error.usageInfo||null,true);
+  throw error;
+ }
  if(!Array.isArray(answer.results)||answer.results.length!==group.length)throw new Error('Gemini повернув неповну відповідь');
  return group.map((photo,i)=>({photo,items:answer.results[i].items, warnings:answer.results[i].warnings||[],usage:i===0?answer.usage:null}));
 }
@@ -101,7 +110,7 @@ function recordGeminiUsage(callId, response, failed=false){
  recordedGeminiCalls.add(callId);
  const usage=response?.usageAllAttempts||response?.usage||{};
  const count=Number.isSafeInteger(response?.attempts)?response.attempts:1;
- const reported=Number.isSafeInteger(response?.usageReports)?response.usageReports:0;
+ const reported=Number.isSafeInteger(response?.usageReports)?response.usageReports:(response?.usage?1:0);
  const totals=state.tokenUsage;
  for(const field of ['inputTokens','outputTokens','thinkingTokens','totalTokens']){
   const value=usage[field];
@@ -109,7 +118,7 @@ function recordGeminiUsage(callId, response, failed=false){
  }
  totals.apiRequests+=count;
  totals.retries+=Math.max(0,count-1);
- if(reported<count||failed&&reported===0)totals.incomplete=true;
+ if(reported<count||failed&&reported===0||!response)totals.incomplete=true;
 }
 
 function promoGroups(photos){
@@ -315,6 +324,12 @@ async function sendReport(){
        state.analysisError=`Фотозвіт збережено, але результати перевірки не підтверджено: ${analysisError.message}`;
        state.analysisStatus='Очікує перевірки. Фотографії повторно завантажувати не потрібно.';
      }
+     try{
+      state.progress='Записуємо використання токенів у Google Таблицю…';render();
+      await savePromoTokenUsagePayload(initData);
+     }catch(tokenError){
+      state.tokenUsageError='Не вдалося записати статистику токенів: '+tokenError.message;
+     }
      state.screen='done';
    }catch(error){state.error=`Усі фото збережено, але реєстрацію не підтверджено: ${error.message}. Натисніть повторно — фотографії вдруге не завантажаться.`}
   }
@@ -364,6 +379,15 @@ async function savePromoTokenUsagePayload(initData){
  state.tokenUsageSaved=true;
  state.tokenUsageError='';
  return result;
+}
+
+async function retryPromoTokenUsageSave(){
+ if(state.uploading||!state.reportId)return;
+ state.uploading=true;state.tokenUsageError='';state.screen='upload';
+ state.progress='Повторюємо запис статистики токенів…';render();
+ try{await savePromoTokenUsagePayload(getInitData())}
+ catch(error){state.tokenUsageError='Не вдалося записати статистику токенів: '+error.message}
+ finally{state.uploading=false;state.screen='done';render()}
 }
 
 async function retryPromoAnalysisSave(){
