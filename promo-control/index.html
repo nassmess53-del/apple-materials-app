@@ -27,10 +27,10 @@ root.innerHTML=`<section class="card"><div class="step">ЕТАП ${i+1} ІЗ 2</
 let chosen=-1;const camera=document.getElementById('camera'),gallery=document.getElementById('gallery');root.querySelectorAll('[data-camera]').forEach(b=>b.onclick=()=>{chosen=+b.dataset.camera;camera.click()});root.querySelectorAll('[data-gallery]').forEach(b=>b.onclick=()=>{chosen=+b.dataset.gallery;gallery.click()});const save=e=>{const f=e.target.files[0];if(f&&chosen>=0&&f.type.startsWith('image/')){if(state.reportId)return;release(files[chosen]);files[chosen]=f;render()}};camera.onchange=save;gallery.onchange=save;
 root.querySelectorAll('[data-clear]').forEach(b=>b.onclick=()=>{const j=+b.dataset.clear;if(state.reportId)return;release(files[j]);files[j]=null;render()});document.getElementById('add').onclick=()=>{if(state.reportId)return;if(files.length<MAX_PHOTOS_PER_SECTION){files.push(null);render()}};document.getElementById('remove').onclick=()=>{if(!state.reportId&&files.length>MIN_PHOTOS_PER_SECTION){const j=files.lastIndexOf(null);if(j>=0)files.splice(j,1);render()}};document.getElementById('back').onclick=()=>{if(i===0)state.screen='store';else state.step--;render()};document.getElementById('next').onclick=()=>{if(i===0)state.step=1;else state.screen='review';render()};return}
 if(state.screen==='upload'){
-root.innerHTML=`<section class="card"><h2>Завантаження</h2><p>${esc(state.progress)}</p>${state.error?`<p style="color:#b42318">${esc(state.error)}</p><button class="primary" id="retry">Повторити непідтверджені</button>`:'<p class="hint">Не закривайте додаток до завершення.</p>'}</section>`;
+root.innerHTML=`<section class="card"><h2>Надсилання фотозвіту</h2><p>${esc(state.progress)}</p>${state.error?`<p style="color:#b42318">${esc(state.error)}</p><button class="primary" id="retry">Повторити надсилання</button>`:'<p class="hint">Будь ласка, не закривайте застосунок до завершення.</p>'}</section>`;
 if(state.error)document.getElementById('retry').onclick=sendReport;return}
 if(state.screen==='done'){
-root.innerHTML=`<section class="card"><h2>Звіт надіслано ✓</h2><p>Фотографії збережено, звіт зареєстровано в Apple Promo Control.</p><p class="hint">${esc(state.analysisStatus||'Результати перевірки очікуються.')}</p>${state.analysisError?`<p style="color:#b42318">${esc(state.analysisError)}</p><button class="primary" id="retryAnalysis">Повторити запис результатів</button>`:''}${state.tokenUsageError?`<p style="color:#b42318">${esc(state.tokenUsageError)}</p><button class="primary" id="retryTokens">Повторити запис токенів</button>`:''}${state.folderUrl?`<a target="_blank" rel="noopener" href="${esc(state.folderUrl)}">Відкрити Google Drive</a>`:''}</section>`;
+root.innerHTML=`<section class="card"><h2>Звіт надіслано ✓</h2><p>Фотографії збережено. Дякуємо за надісланий звіт!</p><p class="hint">${esc(state.analysisStatus||'Результати перевірки готуються.')}</p>${state.analysisError?`<p style="color:#b42318">${esc(state.analysisError)}</p><button class="primary" id="retryAnalysis">Повторити збереження результатів</button>`:''}${state.tokenUsageError?`<p style="color:#b42318">${esc(state.tokenUsageError)}</p><button class="primary" id="retryTokens">Повторити завершення обробки</button>`:''}${state.folderUrl?`<a target="_blank" rel="noopener" href="${esc(state.folderUrl)}">Відкрити Google Drive</a>`:''}</section>`;
  if(state.analysisError)document.getElementById('retryAnalysis').onclick=retryPromoAnalysisSave;
  if(state.tokenUsageError)document.getElementById('retryTokens').onclick=retryPromoTokenUsageSave;return}
 if(state.screen==='review'){
@@ -73,7 +73,7 @@ function checkAiA5(item,dateText){
  const end=parseAiDate(item.endDate,+m[3]);
  if(!start.date&&!end.date)return 'Потрібна ручна перевірка: дату акції не розпізнано';
  if((!start.missing&&!start.date)||(!end.missing&&!end.date))return 'Потрібна ручна перевірка: некоректна дата';
- if(String(item.confidence||'').toLowerCase()!=='high')return 'Потрібна ручна перевірка: недостатня впевненість Gemini';
+ if(String(item.confidence||'').toLowerCase()!=='high')return 'Потрібна ручна перевірка: дані на фото розпізнано неоднозначно';
  // Без явно вказаного року перехід грудень/січень неоднозначний.
  if(start.date&&end.date&&start.date>end.date)return 'Потрібна ручна перевірка: неоднозначний період';
  if(start.date&&report<start.date)return 'Неактуальна — акція ще не почалася. Приберіть або замініть А5';
@@ -106,7 +106,7 @@ async function analyzePromoGroup(group,initData){
   recordGeminiUsage(callId,error.usageInfo||null,true);
   throw error;
  }
- if(!Array.isArray(answer.results)||answer.results.length!==group.length)throw new Error('Gemini повернув неповну відповідь');
+ if(!Array.isArray(answer.results)||answer.results.length!==group.length)throw new Error('Не вдалося повністю перевірити фотографії');
  return group.map((photo,i)=>({photo,items:answer.results[i].items, warnings:answer.results[i].warnings||[],usage:i===0?answer.usage:null}));
 }
 // Накопичуємо підтверджені токени кожного звернення до Gemini,
@@ -144,7 +144,7 @@ function promoPhotoReadability(photo,items){
   for(const item of items){
    if(!String(item.model||'').trim())return 'Не вдалося прочитати модель товару';
    if(!Number.isFinite(Number(item.priceUah))||Number(item.priceUah)<=0)return 'Не вдалося прочитати ціну';
-   if(String(item.confidence||'').toLowerCase()==='low')return 'Низька впевненість розпізнавання: '+String(item.note||'перезніміть цінник');
+   if(String(item.confidence||'').toLowerCase()==='low')return 'Деякі дані нечіткі: '+String(item.note||'перезніміть цінник');
   }
  }else{
   // А5 необов'язкова. Якщо додана, дата має бути розбірливою для перевірки.
@@ -170,7 +170,7 @@ async function testAllPromoPhotos(){
   const groups=promoGroups(pending);
   for(let i=0;i<groups.length;i++){
    const group=groups[i];
-   if(result)result.textContent=`Перевірка ${i+1} із ${groups.length} груп…`;
+   if(result)result.textContent=`Перевіряємо фотографії… ${i+1} із ${groups.length}`;
    try{
     const rows=await analyzePromoGroup(group,initData);
     for(const row of rows){
@@ -179,7 +179,7 @@ async function testAllPromoPhotos(){
      if(row.usage){tokens.input+=row.usage.inputTokens||0;tokens.output+=row.usage.outputTokens||0;tokens.total+=row.usage.totalTokens||0}
     }
    }catch(e){
-    for(const p of group)promoPrecheckCache.set(p.file,{status:'error',reason:e.message||'Помилка сервісу'});
+    for(const p of group)promoPrecheckCache.set(p.file,{status:'error',reason:'Не вдалося перевірити фотографію. Спробуйте ще раз.'});
     if(e.status===429)break;
    }
   }
@@ -192,8 +192,8 @@ async function testAllPromoPhotos(){
     r?.status==='replace'?`✕ ${title}: ${r.reason}. Замініть фото у відповідному етапі.`:
     `! ${title}: ${r?.reason||'Ще не перевірено'}. Повторіть перевірку.`);
   }
-  lines.push(`Токени цієї перевірки: ${tokens.total}`);
-  lines.push(allPromoPhotosReady()?'Можна надсилати звіт.':'Надсилання заблоковано до успішної перевірки.');
+  lines.push(``);
+  lines.push(allPromoPhotosReady()?'Можна надсилати звіт.':'Перевірте фотографії з позначками та повторіть перевірку.');
   render();
   const output=document.getElementById('aiResult');
   if(output){output.hidden=false;output.textContent=lines.join('\n\n')}
@@ -226,7 +226,7 @@ async function preparePhoto(file,step){
       ctx.imageSmoothingQuality='high';
       ctx.drawImage(bitmap,0,0,width,height);
       const blob=await new Promise((resolve,reject)=>canvas.toBlob(
-        result=>result?resolve(result):reject(new Error('Не вдалося підготувати JPEG')),
+        result=>result?resolve(result):reject(new Error('Не вдалося підготувати фотографію')),
         'image/jpeg',PHOTO_JPEG_QUALITY
       ));
       canvas.width=0;canvas.height=0;
@@ -276,14 +276,14 @@ async function sendReport(){
  state.uploading=true;state.error='';state.screen='upload';
  if(!state.reportId){state.reportId=newId();state.reportDate=promoKyivDate()}
  try{
-  state.progress='Перевірка Telegram…';render();
+  state.progress='Готуємо фотозвіт до надсилання…';render();
   await apiPostPromo('/auth',{initData},15000);
   files.forEach(item=>{item.uploadId=uploadIdFor(item.key,item.file)});
   const pending=files.filter(item=>uploadedFiles.get(item.key)!==item.file);
   let completed=files.length-pending.length,nextIndex=0;
   const errors=[];
-  const progress=(message='')=>{state.progress=`Збережено ${completed} із ${files.length} фото. До ${PARALLEL_UPLOADS} одночасних завантажень. ${message}`;render()};
-  progress('Не закривайте Telegram.');
+  const progress=(message='')=>{state.progress=`Завантажено ${completed} із ${files.length} фотографій. ${message}`;render()};
+  progress('');
   async function uploadWorker(){
    while(nextIndex<pending.length){
     const item=pending[nextIndex++];
@@ -298,11 +298,11 @@ async function sendReport(){
      for(let attempt=1;attempt<=MAX_ATTEMPTS;attempt++){
       try{
        await apiPostPromo('/promo/upload',{initData,storeName:label(state.store),reportDate:state.reportDate,fileName,mimeType:prepared.type||'image/jpeg',uploadId,base64Data});
-       uploadedFiles.set(key,file);completed++;progress('Не закривайте Telegram.');lastError=null;break;
+       uploadedFiles.set(key,file);completed++;progress('');lastError=null;break;
       }catch(error){
        lastError=error;
        if(!error.retryable||attempt===MAX_ATTEMPTS)break;
-       progress(`Повторна спроба для фото ${number} (етап ${step})…`);
+       progress(`Повторюємо надсилання фотографії №${number}…`);
        await wait(1500*Math.pow(2,attempt-1)+Math.random()*800);
       }
      }
@@ -312,34 +312,34 @@ async function sendReport(){
   }
   await Promise.all(Array.from({length:Math.min(PARALLEL_UPLOADS,pending.length)},()=>uploadWorker()));
   if(errors.length){
-   state.error=`Не підтверджено ${errors.length} фото. ${errors[0]}. Натисніть «Повторити непідтверджені».`;
+   console.error('Помилки фотографій:',errors);state.error=`Не вдалося підтвердити ${errors.length} фотографій. Натисніть «Повторити надсилання».`;
    progress('');
   }else{
-   state.progress='Усі фотографії збережено. Реєструємо фотозвіт у Google Таблиці…';render();
+   state.progress='Усі фотографії завантажено. Зберігаємо фотозвіт…';render();
    try{
     const result=await apiPostPromo('/promo/complete',{initData,reportId:state.reportId,apid:String(state.store.id),storeName:label(state.store),reportDate:state.reportDate});
      state.folderUrl=result.folderUrl||'';
-     state.progress='Фотографії збережено. Gemini перевіряє А5 та цінники…';render();
+     state.progress='Перевіряємо фотографії…';render();
      try{
        state.analysisPayload=await collectPromoAnalysis(files,initData);
-       state.progress='Записуємо результати перевірки в Google Таблицю…';render();
+       state.progress='Зберігаємо результати перевірки…';render();
        await savePromoAnalysisPayload(initData);
        state.analysisSaved=true;
-       state.analysisStatus='Перевірку завершено. Результати передано до Google Таблиці.';
+       state.analysisStatus='Перевірку завершено. Результати збережено.';
      }catch(analysisError){
-       state.analysisError=`Фотозвіт збережено, але результати перевірки не підтверджено: ${analysisError.message}`;
-       state.analysisStatus='Очікує перевірки. Фотографії повторно завантажувати не потрібно.';
+       console.error('Помилка збереження результатів:',analysisError);state.analysisError='Фотозвіт збережено, але результати перевірки поки не підтверджено. Спробуйте повторити збереження.';
+       state.analysisStatus='Результати ще зберігаються. Повторно надсилати фотографії не потрібно.';
      }
      try{
-      state.progress='Записуємо використання токенів у Google Таблицю…';render();
+      state.progress='Завершуємо обробку звіту…';render();
       await savePromoTokenUsagePayload(initData);
      }catch(tokenError){
-      state.tokenUsageError='Не вдалося записати статистику токенів: '+tokenError.message;
+      console.error('Помилка статистики:',tokenError);state.tokenUsageError='Звіт збережено, але завершення обробки не підтверджено. Спробуйте ще раз.';
      }
      state.screen='done';
-   }catch(error){state.error=`Усі фото збережено, але реєстрацію не підтверджено: ${error.message}. Натисніть повторно — фотографії вдруге не завантажаться.`}
+   }catch(error){console.error('Помилка реєстрації:',error);state.error='Фотографії завантажено, але завершення надсилання не підтверджено. Спробуйте ще раз — фотографії повторно не завантажуватимуться.'}
   }
- }catch(error){state.error=`Не вдалося виконати запит: ${error.message}`}
+ }catch(error){console.error('Помилка надсилання:',error);state.error='Не вдалося завершити надсилання. Перевірте з’єднання та спробуйте ще раз.'}
  finally{state.uploading=false;render()}
 }
 // Аналіз запускається тільки ПІСЛЯ підтвердження збереження фотозвіту.
@@ -390,21 +390,21 @@ async function savePromoTokenUsagePayload(initData){
 async function retryPromoTokenUsageSave(){
  if(state.uploading||!state.reportId)return;
  state.uploading=true;state.tokenUsageError='';state.screen='upload';
- state.progress='Повторюємо запис статистики токенів…';render();
+ state.progress='Завершуємо збереження звіту…';render();
  try{await savePromoTokenUsagePayload(getInitData())}
- catch(error){state.tokenUsageError='Не вдалося записати статистику токенів: '+error.message}
+ catch(error){console.error('Помилка статистики:',error);state.tokenUsageError='Не вдалося завершити обробку. Спробуйте ще раз.'}
  finally{state.uploading=false;state.screen='done';render()}
 }
 
 async function retryPromoAnalysisSave(){
  if(state.uploading||!state.analysisPayload)return;
  state.uploading=true;state.analysisError='';state.screen='upload';
- state.progress='Повторюємо запис результатів у Google Таблицю…';render();
+ state.progress='Повторюємо збереження результатів…';render();
  try{
   await savePromoAnalysisPayload(getInitData());
   state.analysisSaved=true;
-  state.analysisStatus='Результати передано до Google Таблиці.';
- }catch(error){state.analysisError=`Не вдалося записати результати: ${error.message}`}
+  state.analysisStatus='Результати перевірки збережено.';
+ }catch(error){console.error('Помилка результатів:',error);state.analysisError='Не вдалося підтвердити збереження результатів. Спробуйте ще раз.'}
  finally{state.uploading=false;state.screen='done';render()}
 }
 
@@ -415,8 +415,8 @@ async function apiPostPromo(path,payload,timeoutMs=55000){
  const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),timeoutMs);
  try{
   const response=await fetch(API_URL+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal});
-  let data;try{data=await response.json()}catch{throw Object.assign(new Error('Сервер повернув некоректну відповідь'),{retryable:response.status>=500})}
-  if(!response.ok||!data.success)throw Object.assign(new Error(data.error||`Помилка сервера (${response.status})`),{retryable:data.retryable===true||response.status===429||response.status>=500,status:response.status,usageInfo:data});
+  let data;try{data=await response.json()}catch{throw Object.assign(new Error('Не вдалося отримати підтвердження. Спробуйте ще раз'),{retryable:response.status>=500})}
+  if(!response.ok||!data.success)throw Object.assign(new Error(data.error||`Тимчасова помилка під час обробки запиту`),{retryable:data.retryable===true||response.status===429||response.status>=500,status:response.status,usageInfo:data});
   return data;
  }catch(error){
   if(error.name==='AbortError')throw Object.assign(new Error('Час очікування відповіді минув'),{retryable:true});
