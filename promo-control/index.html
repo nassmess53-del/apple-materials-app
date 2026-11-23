@@ -381,7 +381,7 @@ async function savePromoTokenUsagePayload(initData){
   thinkingTokens:u.thinkingTokens,totalTokens:u.totalTokens,
   apiRequests:u.apiRequests,retries:u.retries,
   status:u.incomplete?'Неповний':'Повний'
- },70000);
+ },59000);
  state.tokenUsageSaved=true;
  state.tokenUsageError='';
  return result;
@@ -427,3 +427,4 @@ async function apiPostPromo(path,payload,timeoutMs=70000){
 
 function showStores(query){const q=query.trim().toLocaleLowerCase();const matches=STORES.filter(s=>label(s).toLocaleLowerCase().includes(q)).sort((a,b)=>label(a).localeCompare(label(b),'uk'));const el=document.getElementById('storeResults');el.innerHTML=matches.map(s=>`<button type="button" data-id="${s.id}">${esc(label(s))}</button>`).join('')||'<p class="muted">Магазин не знайдено</p>';el.querySelectorAll('[data-id]').forEach(b=>b.onclick=()=>{state.store=STORES.find(s=>s.id===b.dataset.id);document.getElementById('search').value=label(state.store);document.getElementById('selected').textContent=label(state.store);document.getElementById('next').disabled=false;el.innerHTML=''})}
 try{window.Telegram?.WebApp?.ready();window.Telegram?.WebApp?.expand()}catch(e){}render();
+</script></body></html>
