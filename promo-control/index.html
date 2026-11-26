@@ -99,8 +99,39 @@ function promoDisplayCategory(model){
  return 'Інші позиції';
 }
 // Скорочення лише для показу в інформаційному списку. Повні дані не змінюються.
+// Apple Watch: скорочення тільки для інформаційного списку, без характеристик ремінця.
+function promoDisplayWatch(model){
+ const original=String(model||'');
+ const n=original.replace(/[‐‑‒–—−]/g,'-').replace(/\s+/g,' ').trim();
+ const family=n.match(/^(?:Apple\s*)?Watch\s*(Series|SE|Ultra)\s*(\d{1,2})?/i);
+ if(!family)return original;
+ const label='Apple Watch '+({series:'Series',se:'SE',ultra:'Ultra'}[family[1].toLowerCase()])+(family[2]?' '+family[2]:'');
+ const tail=n.slice(family[0].length);
+ // У прайсі слова можуть бути склеєні: 12Black Aluminium42mmBlack Sport BandS/M.
+ const size=tail.match(/(\d{2})\s*(?:mm|мм)/i);
+ const material=tail.match(/aluminium|aluminum|titanium|stainless\s*steel|ceramic|алюміній|алюмінієв\p{L}*|титан(?:ов\p{L}*)?|нержавіюча\s*сталь|кераміка/iu);
+ let caseText='';
+ if(material){
+  // Колір корпусу шукаємо перед матеріалом; колір ремінця після матеріалу/розміру не використовуємо.
+  caseText=tail.slice(0,material.index);
+ }else if(size){
+  caseText=tail.slice(0,size.index);
+ }else{
+  const explicit=tail.match(/^(.*?)(?:\bcase\b|корпус)/iu);
+  if(explicit)caseText=explicit[1];
+ }
+ const colors=['Jet Black','Space Black','Space Grey','Space Gray','Light Gold','Rose Gold','Natural Titanium','Natural','Slate','Starlight','Midnight','Silver','Gold','Black','White','Blue','Red','Pink','Green','Graphite','Desert','Dark Grey','Dark Gray','Natural Silver','Космічний чорний','Космічний сірий','Чорний','Сріблястий','Срібний','Золотий','Рожевий','Синій','Білий','Природний','Темна ніч','Зіркове сяйво'];
+ // Підтримуємо відсутність пробілу після номера серії або перед матеріалом.
+ caseText=caseText.replace(/\d{2}\s*(?:mm|мм)/gi,' ');
+ const color=colors.sort((a,b)=>b.length-a.length).find(c=>new RegExp('(?:^|[^\\p{L}])'+c.replace(/ /g,'\\s*')+'(?=$|[^\\p{L}])','iu').test(caseText));
+ const mat=material?material[0].replace(/^aluminum$/i,'Aluminium').replace(/^aluminium$/i,'Aluminium').replace(/^titanium$/i,'Titanium').replace(/^stainless\s*steel$/i,'Stainless Steel').replace(/^ceramic$/i,'Ceramic'):'';
+ // Тип підключення — тільки явно зазначений у назві; не визначаємо за моделлю.
+ const network=/GPS\s*(?:\+|&|and|\/|\s)\s*Cellular|\bCellular\b/i.test(tail)?'GPS + Cellular':/GPS/i.test(tail)?'GPS':'';
+ return [label,color&&color.toLowerCase()==='natural titanium'&&mat.toLowerCase()==='titanium'?'Natural':color,mat,size?size[1]+' mm':'',network].filter(Boolean).join(' ');
+}
 function promoDisplayModel(model){
  const original=String(model||'');
+ if(promoDisplayCategory(original)==='Apple Watch')return promoDisplayWatch(original);
  if(promoDisplayCategory(original)!=='MacBook')return original;
  const n=original.replace(/[‐‑‒–—−]/g,'-').replace(/\s+/g,' ').trim();
  const family=n.match(/\bMacBook\s+(Air|Pro)\b/i);
@@ -142,7 +173,7 @@ function renderPromoGroups(){
 function renderCurrentPromo(){
  const ready=currentPromo.status==='ready';
  const loading=currentPromo.status==='loading';
- root.innerHTML=`<section class="card"><div class="step">ЕТАП 1 ІЗ 3</div><h2>Актуальні промо</h2><p class="muted">Станом на ${esc(currentPromo.date||promoKyivDate())}</p><p>За бажанням ознайомтеся з актуальними промопозиціями або одразу перейдіть до наступного етапу.</p><p class="hint">Необхідно сфотографувати цінники всіх представлених у магазині позицій, які беруть участь в актуальних промоакціях.</p>${ready?`${currentPromo.warnings.map(w=>`<p class="hint" role="status">${esc(w)}</p>`).join('')}${currentPromo.offers.length?`<p class="muted">Актуальних позицій: ${currentPromo.offers.length}</p><input type="search" id="currentPromoSearch" placeholder="Пошук моделі" value="${esc(currentPromo.query)}"><div class="promo-list" id="currentPromoList"></div>`:`<p class="muted">${currentPromo.warnings.length?'У доступних даних актуальних промопозицій не знайдено.':'На сьогодні актуальних промопозицій немає.'}</p>`}`:loading?'<p class="muted" role="status">Завантажуємо актуальні промо…</p>':`<p class="directory-error" role="alert">${esc(currentPromo.error||'Перелік ще не завантажено.')}</p><button id="promoRetry">Повторити завантаження</button>`}</section><div class="footer actions"><button id="back">← Назад</button><button class="primary" id="next">${ready?'Наступний етап →':'Пропустити →'}</button></div>`;
+ root.innerHTML=`<section class="card"><div class="step">ЕТАП 1 ІЗ 3</div><h2>Актуальні промо</h2><p class="muted">Станом на ${esc(currentPromo.date||promoKyivDate())}</p><p>Ознайомтеся з актуальними промопозиціями або одразу перейдіть до наступного етапу.</p><p class="hint">Необхідно сфотографувати цінники всіх представлених у магазині позицій, які беруть участь в актуальних промоакціях.</p>${ready?`${currentPromo.warnings.map(w=>`<p class="hint" role="status">${esc(w)}</p>`).join('')}${currentPromo.offers.length?`<p class="muted">Актуальних позицій: ${currentPromo.offers.length}</p><input type="search" id="currentPromoSearch" placeholder="Пошук моделі" value="${esc(currentPromo.query)}"><div class="promo-list" id="currentPromoList"></div>`:`<p class="muted">${currentPromo.warnings.length?'У доступних даних актуальних промопозицій не знайдено.':'На сьогодні актуальних промопозицій немає.'}</p>`}`:loading?'<p class="muted" role="status">Завантажуємо актуальні промо…</p>':`<p class="directory-error" role="alert">${esc(currentPromo.error||'Перелік ще не завантажено.')}</p><button id="promoRetry">Повторити завантаження</button>`}</section><div class="footer actions"><button id="back">← Назад</button><button class="primary" id="next">${ready?'Наступний етап →':'Пропустити →'}</button></div>`;
  document.getElementById('back').onclick=()=>{state.screen='store';render()};
  document.getElementById('next').onclick=()=>{state.step=0;state.screen='steps';render()};
  const retry=document.getElementById('promoRetry');if(retry)retry.onclick=loadCurrentPromo;
