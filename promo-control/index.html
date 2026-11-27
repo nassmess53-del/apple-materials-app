@@ -526,20 +526,11 @@ async function testAllPromoPhotos(){
   for(let i=0;i<groups.length;i++){
    const group=groups[i];
    if(result)result.textContent=`Триває перевірка фотографій… ${i+1} із ${groups.length}`;
-   // Тимчасові збої Gemini (таймаут, перевантаження): автоматично повторюємо,
-   // а пару фото за потреби перевіряємо по одному. Логіка перевірки та сама.
+   // Як раніше: одна спроба на групу, без автоповтору.
+   // Наступне натискання «Перевірити» відправляє лише фото, що не пройшли.
    const rows=[];let lastError=null,limitReached=false;
-   const attempt=async photos=>{
-    for(let tryNo=1;tryNo<=2;tryNo++){
-     try{rows.push(...await analyzePromoGroup(photos,initData));return true}
-     catch(e){lastError=e;if(e.status===429){limitReached=true;return false}
-      if(tryNo<2){if(result)result.textContent=`Триває перевірка фотографій… ${i+1} із ${groups.length} (повторна спроба)`;await wait(2000)}}
-    }
-    return false;
-   };
-   if(!await attempt(group)&&!limitReached&&group.length>1){
-    for(const p of group){if(limitReached)break;await attempt([p])}
-   }
+   try{rows.push(...await analyzePromoGroup(group,initData))}
+   catch(e){lastError=e;if(e.status===429)limitReached=true}
    for(const row of rows){
     const reason=promoPhotoReadability(row.photo,row.items);
     promoPrecheckCache.set(row.photo.file,{status:reason?'replace':'ok',reason,items:row.items});
