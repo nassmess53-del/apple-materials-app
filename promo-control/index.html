@@ -41,6 +41,8 @@
 .progress-bar span{display:block;height:100%;width:0;background:#1468df;transition:width .2s}
 .pending-toggle{display:flex;align-items:center;gap:8px;margin:12px 0 2px;font-size:14px;color:#4b5563}
 .pending-toggle input{width:18px;height:18px}
+.warn-box{margin-top:10px;padding:10px 12px;border-radius:10px;background:#fff4e5;color:#8a4b00;font-size:13px;line-height:1.45}
+.promo-offer.warn{background:#fffaf2}
 .reuse-box{margin-top:10px;padding:10px;border-radius:12px;background:#eef5ff}
 .reuse-pick{width:76px;height:76px;padding:0;border-radius:10px;overflow:hidden;background:#fff}
 .reuse-pick img{width:100%;height:100%;object-fit:cover;display:block}
@@ -126,6 +128,50 @@ function promoAllResolved(){return currentPromo.status==='ready'&&promoItems().e
 function absentOffers(){
  return promoItems().filter(g=>state.offerMarks[g.key]?.absent).map(g=>({model:g.model,promoPrice:g.promoPrice,partNumber:g.partNumber}));
 }
+// ---------- Чи є товар картки на її фото (після перевірки Gemini, без нових запитів) ----------
+// Порівнюємо лише тип товару та лінійку: без пам'яті й кольору, щоб не було хибних тривог.
+function promoFamilyKey(text){
+ const t=String(text||'').toLowerCase().replace(/[‐‑‒–—−]/g,'-');
+ const isCase=/\bcase\b|чохол|\bcover\b|folio/.test(t);
+ let m;
+ if(/\bwatch\b/.test(t)&&!/\bband\b(?!.*\d{2}\s*mm)/.test(t)){m=t.match(/\b(series|se|ultra)\s*(\d+)?/);return 'watch:'+(m?m[1]+(m[2]||''):'')}
+ if(/iphone/.test(t)){m=t.match(/iphone\s*(\d+|air)\s*(pro\s*max|pro|plus|e)?\b/);return (isCase?'case:':'')+'iphone:'+(m?m[1]+':'+(m[2]||'base').replace(/\s+/g,''):':')}
+ if(/macbook/.test(t)){const v=/macbook\s*pro/.test(t)?'pro':/macbook\s*air/.test(t)?'air':'';const s=t.match(/\b(13|14|15|16)(?:[.,]\d)?\s*(?:-?\s*inch|″|"|дюйм)/)||t.match(/macbook\s*(?:air|pro)\s*\(?\s*(13|14|15|16)\b/);return 'macbook:'+v+':'+(s?s[1]:'')}
+ if(/ipad/.test(t)&&!/keyboard|pencil|клавіат/.test(t)){const v=/ipad\s*pro/.test(t)?'pro':/ipad\s*air/.test(t)?'air':/ipad\s*mini/.test(t)?'mini':'base';return (isCase?'case:':'')+'ipad:'+v}
+ if(/pencil|олівець/.test(t))return 'pencil';
+ if(/airpods/.test(t))return 'airpods:'+(/\bmax\b/.test(t)?'max':/\bpro\b/.test(t)?'pro':'base');
+ if(/keyboard|клавіат/.test(t))return 'keyboard';
+ if(/\bmouse\b|мишк/.test(t))return 'mouse';
+ if(/trackpad|трекпад/.test(t))return 'trackpad';
+ if(/imac/.test(t))return 'imac';
+ if(/mac\s*mini/.test(t))return 'macmini';
+ return '';
+}
+// Порожня частина ключа (невідомий розмір/серія) не вважається розбіжністю.
+function promoKeysCompatible(a,b){
+ if(a===b)return true;
+ const x=a.split(':'),y=b.split(':');
+ return x.length===y.length&&x.every((v,i)=>v===y[i]||v===''||y[i]==='');
+}
+// null — усе гаразд або перевірити неможливо; інакше — назви, які Gemini побачив на фото.
+function cardPhotoMismatch(o){
+ const m=state.offerMarks[offerKey(o)];if(!m||m.absent||!m.photos.length)return null;
+ const card=promoFamilyKey(o.model);if(!card)return null;
+ const seen=[];
+ for(const f of m.photos){
+  const c=promoPrecheckCache.get(f);
+  if(!c||c.status!=='ok')return null; // ще не перевірено або фото треба замінити — окреме повідомлення
+  for(const it of c.items||[])if(it&&it.model)seen.push(String(it.model));
+ }
+ const keyed=seen.filter(s=>promoFamilyKey(s));
+ if(!keyed.length)return null;
+ if(keyed.some(s=>promoKeysCompatible(card,promoFamilyKey(s))))return null;
+ return [...new Set(keyed)].slice(0,3);
+}
+
+// Картки, на фото яких не знайдено їхній товар. Поки такі є — надсилати звіт не можна.
+function photoMismatches(){return promoItems().map(o=>({o,seen:cardPhotoMismatch(o)})).filter(x=>x.seen)}
+
 // Унікальні фото цінників із назвами позицій, до яких вони належать.
 function pricePhotoEntries(){
  const map=new Map();
@@ -300,15 +346,17 @@ function thumbsHtml(photos,attrs){
 }
 function offerCardHtml(o,i){
  const m=state.offerMarks[offerKey(o)],photos=m?.photos||[],absent=!!m?.absent,locked=!!state.reportId;
- const cls=absent?'absent':photos.length?'done':'';
- const badge=absent?'<span class="badge no">🚫 Відсутній</span>':photos.length?`<span class="badge ok">✓ ${photos.length} фото</span>`:'<span class="req">* обов’язково</span>';
+ const mismatch=cardPhotoMismatch(o);
+ const cls=absent?'absent':mismatch?'warn':photos.length?'done':'';
+ const badge=absent?'<span class="badge no">🚫 Відсутній</span>':mismatch?'<span class="badge">⚠️ Перевірте фото</span>':photos.length?`<span class="badge ok">✓ ${photos.length} фото</span>`:'<span class="req">* обов’язково</span>';
+ const warn=mismatch?`<div class="warn-box">⚠️ <b>На фото не знайдено цей товар</b><br>(розпізнано: ${esc(mismatch.join('; '))})<br>Перевірте фото або зробіть нове. Якщо товару немає в магазині — видаліть фото й натисніть «Товар відсутній».</div>`:'';
  let actions='';
  if(!locked){
   if(absent)actions=`<div class="offer-actions"><button type="button" data-act="undo" data-i="${i}">↩ Скасувати «Товар відсутній»</button></div>`;
   else if(photos.length)actions=photos.length>=MAX_PHOTOS_PER_OFFER?'':`<div class="offer-actions"><button type="button" data-act="cam" data-i="${i}">📷 Ще фото</button><button type="button" data-act="gal" data-i="${i}">⬆️ Завантажити фото</button></div>`;
   else actions=`<div class="offer-actions three"><button type="button" class="cam" data-act="cam" data-i="${i}"><span class="ic">📷</span><span>Зробити<br>фото</span></button><button type="button" data-act="gal" data-i="${i}"><span class="ic">⬆️</span><span>Завантажити<br>фото</span></button><button type="button" data-act="absent" data-i="${i}"><span class="ic">🚫</span><span>Товар<br>відсутній</span></button></div>`;
  }
- return `<div class="promo-offer ${cls}"><div class="offer-head"><strong>${esc(o.name)}</strong>${badge}</div><div class="promo-price">Промоціна: <b>${esc(priceFormat.format(o.promoPrice))} грн</b></div><div class="muted">Період: ${esc(o.period||'—')}</div>${thumbsHtml(photos,`data-i="${i}"`)}${actions}</div>`;
+ return `<div class="promo-offer ${cls}"><div class="offer-head"><strong>${esc(o.name)}</strong>${badge}</div><div class="promo-price">Промоціна: <b>${esc(priceFormat.format(o.promoPrice))} грн</b></div><div class="muted">Період: ${esc(o.period||'—')}</div>${thumbsHtml(photos,`data-i="${i}"`)}${warn}${actions}</div>`;
 }
 function renderPromoGroups(){
  const list=document.getElementById('currentPromoList');if(!list)return;
@@ -509,7 +557,7 @@ function promoPhotoReadability(photo,items){
 }
 function allPromoPhotosReady(){
  const photos=currentPromoPhotos();
- return promoAllResolved()&&(photos.length>0||absentOffers().length>0)&&photos.every(p=>promoPrecheckCache.get(p.file)?.status==='ok');
+ return promoAllResolved()&&(photos.length>0||absentOffers().length>0)&&photos.every(p=>promoPrecheckCache.get(p.file)?.status==='ok')&&!photoMismatches().length;
 }
 async function testAllPromoPhotos(){
  if(promoChecking||state.uploading)return;
@@ -550,11 +598,13 @@ async function testAllPromoPhotos(){
     `! ${title}: ${r?.reason||'Ще не перевірено'}. Натисніть «Перевірити фотографії» ще раз.`);
   }
   if(!lines.length)lines.push('Фотографій немає: усі позиції позначено як відсутні.');
-  lines.push(``);
-  lines.push(allPromoPhotosReady()?'Можна надсилати звіт.':'Перевірте фотографії з позначками та повторіть перевірку.');
+  // На фото картки не знайдено її товар — блокує надсилання.
+  const mismatches=photoMismatches();
+  const warnHtml=mismatches.map(x=>`<div class="warn-box">⚠️ Картка «<b>${esc(x.o.name)}</b>»<br><b>На фото не знайдено цей товар</b><br>(розпізнано: ${esc(x.seen.join('; '))})<br>Перевірте фото або зробіть нове.</div>`).join('');
+  const finalLine=allPromoPhotosReady()?'Можна надсилати звіт.':mismatches.length?'<b>Звіт не можна надіслати.</b> Виправте помилки, вказані вище.':'Перевірте фотографії з позначками та повторіть перевірку.';
   render();
   const output=document.getElementById('aiResult');
-  if(output){output.hidden=false;output.textContent=lines.join('\n\n')}
+  if(output){output.hidden=false;output.innerHTML=lines.map(esc).join('<br><br>')+warnHtml+'<br><br>'+finalLine}
  }
 }
 
