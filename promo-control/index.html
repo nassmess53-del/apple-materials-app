@@ -97,15 +97,24 @@ function promoItems(){
  for(const o of currentPromo.offers){
   const {rest,colors}=splitColor(o.model);
   const base=promoDisplayModel(rest).replace(/\s*[-–—·]\s*$/,'').trim();
+  const detail=promoDisplayModel(rest,{cores:true}).replace(/\s*[-–—·]\s*$/,'').trim();
   const key=base.toLowerCase()+'|'+o.promoPrice+'|'+(o.period||'');
-  if(!map.has(key))map.set(key,{key,base,model:o.model,promoPrice:o.promoPrice,period:o.period,partNumber:o.partNumber||'',offers:[],colors:[]});
+  if(!map.has(key))map.set(key,{key,base,detail,model:o.model,promoPrice:o.promoPrice,period:o.period,partNumber:o.partNumber||'',offers:[],colors:[]});
   const g=map.get(key);g.offers.push(o);
   for(const c of colors)if(!g.colors.some(x=>x.toLowerCase()===c.toLowerCase()))g.colors.push(c);
  }
  const list=[...map.values()];
  const perBase=new Map();list.forEach(g=>perBase.set(g.base.toLowerCase(),(perBase.get(g.base.toLowerCase())||0)+1));
- // Кольори в назві — лише коли одна модель має кілька різних цін.
- list.forEach(g=>{g.name=perBase.get(g.base.toLowerCase())>1&&g.colors.length?g.base+' — '+g.colors.join(', '):g.base});
+ // Якщо одна назва має кілька різних цін — уточнюємо: спершу CPU/GPU (MacBook),
+ // а якщо й вони однакові — кольори.
+ list.forEach(g=>{
+  const same=list.filter(x=>x.base.toLowerCase()===g.base.toLowerCase());
+  if(same.length<2){g.name=g.base;return}
+  const byCores=new Set(same.map(x=>x.detail.toLowerCase())).size>1;
+  const label=byCores?g.detail:g.base;
+  const clash=same.filter(x=>(byCores?x.detail:x.base).toLowerCase()===label.toLowerCase()).length>1;
+  g.name=label+(clash&&g.colors.length?' — '+g.colors.join(', '):'');
+ });
  promoItemsCache={src:currentPromo.offers,list};
  return list;
 }
@@ -244,7 +253,9 @@ function promoDisplayWatch(model){
  const network=/GPS\s*(?:\+|&|and|\/|\s)\s*Cellular|\bCellular\b/i.test(tail)?'GPS + Cellular':/GPS/i.test(tail)?'GPS':'';
  return [label,color&&color.toLowerCase()==='natural titanium'&&mat.toLowerCase()==='titanium'?'Natural':color,mat,size?size[1]+' mm':'',network].filter(Boolean).join(' ');
 }
-function promoDisplayModel(model){
+// MacBook: «MacBook Air 15″ · M5 · 16 GB RAM · 512 GB SSD». CPU/GPU — лише з opts.cores
+// (коли без них дві картки з різними цінами мали б однакову назву).
+function promoDisplayModel(model,opts){
  const original=String(model||'');
  if(promoDisplayCategory(original)==='Apple Watch')return promoDisplayWatch(original);
  if(promoDisplayCategory(original)!=='MacBook')return original;
@@ -260,9 +271,10 @@ function promoDisplayModel(model){
   return m?m[1]:'';
  };
  const cpu=core('CPU','ЦП'),gpu=core('GPU','ГП');
- if(cpu)parts.push(cpu+'-core CPU');if(gpu)parts.push(gpu+'-core GPU');
- // Не зчитуємо ємність із опису портів, клавіатури, адаптерів тощо.
- const spec=n.split(/\b(?:Magic Keyboard|keyboard|Force Touch|trackpad|Thunderbolt|USB-C|USB C|MagSafe|power adapter|charging cable|power supply|Neural Engine|display support)\b|клавіатур|трекпад|адаптер живлення|кабель заряджання/i)[0];
+ if(opts&&opts.cores){if(cpu)parts.push(cpu+'-core CPU');if(gpu)parts.push(gpu+'-core GPU')}
+ // Ємність шукаємо в усій назві: «16-core Neural Engine» стоїть ПЕРЕД RAM/SSD
+ // і раніше обрізав назву. Порти й адаптери не містять GB/TB.
+ const spec=n;
  const capacities=[...spec.matchAll(/\b(\d+(?:[.,]\d+)?)\s*(GB|TB|ГБ|ТБ)(?![\p{L}\p{N}])/giu)].map(m=>({value:m[1].replace(',','.'),unit:/^(?:TB|ТБ)$/i.test(m[2])?'TB':'GB',index:m.index,end:m.index+m[0].length}));
  const marked=(after,before)=>capacities.find(c=>after.test(spec.slice(c.end))||before.test(spec.slice(0,c.index)));
  let ram=marked(/^\s*(?:RAM\b|unified memory\b|оперативн|об[’']?єднан)/i,/(?:\bRAM|unified memory|оперативна пам[’']?ять|об[’']?єднана пам[’']?ять)\s*[:=]?\s*$/i);
@@ -514,17 +526,28 @@ async function testAllPromoPhotos(){
   for(let i=0;i<groups.length;i++){
    const group=groups[i];
    if(result)result.textContent=`Триває перевірка фотографій… ${i+1} із ${groups.length}`;
-   try{
-    const rows=await analyzePromoGroup(group,initData);
-    for(const row of rows){
-     const reason=promoPhotoReadability(row.photo,row.items);
-     promoPrecheckCache.set(row.photo.file,{status:reason?'replace':'ok',reason,items:row.items});
-     if(row.usage){tokens.input+=row.usage.inputTokens||0;tokens.output+=row.usage.outputTokens||0;tokens.total+=row.usage.totalTokens||0}
+   // Тимчасові збої Gemini (таймаут, перевантаження): автоматично повторюємо,
+   // а пару фото за потреби перевіряємо по одному. Логіка перевірки та сама.
+   const rows=[];let lastError=null,limitReached=false;
+   const attempt=async photos=>{
+    for(let tryNo=1;tryNo<=2;tryNo++){
+     try{rows.push(...await analyzePromoGroup(photos,initData));return true}
+     catch(e){lastError=e;if(e.status===429){limitReached=true;return false}
+      if(tryNo<2){if(result)result.textContent=`Триває перевірка фотографій… ${i+1} із ${groups.length} (повторна спроба)`;await wait(2000)}}
     }
-   }catch(e){
-    for(const p of group)promoPrecheckCache.set(p.file,{status:'error',reason:'Не вдалося перевірити фотографію. Спробуйте ще раз.'});
-    if(e.status===429)break;
+    return false;
+   };
+   if(!await attempt(group)&&!limitReached&&group.length>1){
+    for(const p of group){if(limitReached)break;await attempt([p])}
    }
+   for(const row of rows){
+    const reason=promoPhotoReadability(row.photo,row.items);
+    promoPrecheckCache.set(row.photo.file,{status:reason?'replace':'ok',reason,items:row.items});
+    if(row.usage){tokens.input+=row.usage.inputTokens||0;tokens.output+=row.usage.outputTokens||0;tokens.total+=row.usage.totalTokens||0}
+   }
+   const why=lastError&&lastError.message?` (${lastError.message})`:'';
+   for(const p of group)if(!rows.some(r=>r.photo.file===p.file))promoPrecheckCache.set(p.file,{status:'error',reason:'Не вдалося перевірити фотографію'+why});
+   if(limitReached)break;
   }
  }finally{
   promoChecking=false;
@@ -533,7 +556,7 @@ async function testAllPromoPhotos(){
    const title=photoTitle(p);
    lines.push(r?.status==='ok'?`✓ ${title}: читається`:
     r?.status==='replace'?`✕ ${title}: ${r.reason}. Замініть фото (${p.step===1?'етап «Графіка А5»':'етап «Промопозиції», картка позначена червоною рамкою'}).`:
-    `! ${title}: ${r?.reason||'Ще не перевірено'}. Повторіть перевірку.`);
+    `! ${title}: ${r?.reason||'Ще не перевірено'}. Натисніть «Перевірити фотографії» ще раз.`);
   }
   if(!lines.length)lines.push('Фотографій немає: усі позиції позначено як відсутні.');
   lines.push(``);
